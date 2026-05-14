@@ -1,0 +1,39 @@
+name: 自动同步上游仓库
+on:
+  # 每天 UTC 0 点（北京时间 8 点）自动同步
+  schedule:
+    - cron: '0 0 * * *'
+  # 允许手动点击运行
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 关键：给 Action 推送权限
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 配置 Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: 添加上游仓库
+        run: |
+          # ↓↓↓ 这里改成【你 Fork 的原项目地址】↓↓↓
+          UPSTREAM_REPO="https://github.com/EdNovas/dongguaTV.git"
+          git remote add upstream $UPSTREAM_REPO
+          git fetch upstream
+
+      - name: 合并上游更新并推送
+        run: |
+          # ↓↓↓ 这里改成你要同步的分支（main 或 master）↓↓↓
+          TARGET_BRANCH="main"
+          git checkout $TARGET_BRANCH
+          git merge upstream/$TARGET_BRANCH --allow-unrelated-histories
+          git push https://${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git $TARGET_BRANCH
