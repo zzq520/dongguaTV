@@ -172,6 +172,249 @@ app.get('/api/sites', async (req, res) => {
     }
 });
 
+// ========== API: /api/check ==========
+// 服务器端测速兜底：客户端直连+代理都失败时(混合内容/CORS)由服务器测资源站 API 延迟。
+// 注：此接口在早期重构中丢失，前端一直调用导致 404 → 服务器测速这条兜底失效，已恢复。
+app.get('/api/check', async (req, res) => {
+    const { key } = req.query;
+    try {
+        let sitesData = EMBEDDED_SITES;
+        if (!sitesData) {
+            const now = Date.now();
+            if (remoteDbCache && now - remoteDbLastFetch < REMOTE_DB_CACHE_TTL) {
+                sitesData = remoteDbCache;
+            } else if (REMOTE_DB_URL) {
+                const response = await axios.get(REMOTE_DB_URL, { timeout: 5000 });
+                if (response.data && Array.isArray(response.data.sites)) {
+                    remoteDbCache = response.data;
+                    remoteDbLastFetch = now;
+                    sitesData = remoteDbCache;
+                }
+            }
+        }
+        const sites = (sitesData && sitesData.sites) || [];
+        const site = sites.find(s => s.key === key);
+        if (!site || !site.api) return res.json({ latency: 9999 });
+        const start = Date.now();
+        try {
+            await axios.get(`${site.api}?ac=list&pg=1`, { timeout: 3000 });
+            return res.json({ latency: Date.now() - start, _testType: 'server' });
+        } catch (e) {
+            return res.json({ latency: 9999 });
+        }
+    } catch (e) {
+        return res.json({ latency: 9999 });
+    }
+});
+
+// ========== API: /api/preview ==========
+// 🔗 分享深链预览：未登录用户打开 /?play=剧名 时，前端用本接口拿 TMDB 简介+海报渲染"锁定框架"
+//   （标题+简介+黑屏播放器+登录提示），全程不碰任何资源站。带内存缓存 + 轻量限流防刷。
+const previewCache = new Map(); // name -> { data, expiry }
+const PREVIEW_CACHE_TTL = 6 * 60 * 60 * 1000;   // 命中缓存 6 小时
+const PREVIEW_MISS_TTL = 10 * 60 * 1000;        // 降级缓存 10 分钟
+const PREVIEW_CACHE_MAX = 2000;
+const previewRate = new Map();                   // ip -> [timestamps] 滑动窗口限流(serverless 内best-effort)
+const PREVIEW_RATE_WINDOW = 60 * 1000;
+const PREVIEW_RATE_MAX = 40;                      // 每 IP 每分钟最多 40 次
+// 全站 TMDB 调用封顶：即使伪造 X-Forwarded-For 绕过单 IP 限流 + 用不同 name 绕过缓存，也无法无限放大 TMDB 调用
+let previewTmdbWindowStart = 0, previewTmdbCount = 0;
+const PREVIEW_TMDB_WINDOW = 60 * 1000;
+const PREVIEW_TMDB_MAX = 300;
+function previewTmdbBudgetOk() {
+    const now = Date.now();
+    if (now - previewTmdbWindowStart > PREVIEW_TMDB_WINDOW) { previewTmdbWindowStart = now; previewTmdbCount = 0; }
+    if (previewTmdbCount >= PREVIEW_TMDB_MAX) return false;
+    previewTmdbCount++;
+    return true;
+}
+app.get('/api/preview', async (req, res) => {
+    // 轻量限流：每 IP 每分钟 40 次
+    try {
+        const ip = getClientIP(req) || req.ip || '0.0.0.0';
+        const now = Date.now();
+        const arr = (previewRate.get(ip) || []).filter(t => now - t < PREVIEW_RATE_WINDOW);
+        if (arr.length >= PREVIEW_RATE_MAX) {
+            return res.status(429).json({ error: '预览请求过于频繁，请稍后再试' });
+        }
+        arr.push(now);
+        previewRate.set(ip, arr);
+        if (previewRate.size > 5000) { const k = previewRate.keys().next().value; if (k !== undefined) previewRate.delete(k); }
+    } catch (e) { /* 限流失败不阻断 */ }
+
+    const name = String(req.query.name || '').slice(0, 100).trim();
+    if (!name) return res.json({ name: '', title: '', synopsis: '', poster: '', year: '' });
+
+    const cached = previewCache.get(name);
+    if (cached && cached.expiry > Date.now()) {
+        res.set('Cache-Control', 'public, max-age=3600');
+        return res.json(cached.data);
+    }
+
+    const data = { name, title: name, synopsis: '', poster: '', year: '' };
+    try {
+        if (TMDB_API_KEY && previewTmdbBudgetOk()) {
+            // 预览为非关键路径：按是否配置代理决定 base，跳过逐请求 geo-IP 查询(可达 3s)，避免拖慢/函数超时
+            const TMDB_BASE = TMDB_PROXY_URL
+                ? `${TMDB_PROXY_URL.replace(/\/$/, '')}/api/3`
+                : 'https://api.themoviedb.org/3';
+            const r = await axios.get(`${TMDB_BASE}/search/multi`, {
+                params: { api_key: TMDB_API_KEY, language: 'zh-CN', query: name },
+                timeout: 2500
+            });
+            const results = (r.data && r.data.results) || [];
+            const hit = results.find(x => (x.poster_path || x.backdrop_path) && x.overview)
+                || results.find(x => x.poster_path || x.backdrop_path)
+                || results[0];
+            if (hit) {
+                data.title = hit.title || hit.name || name;
+                data.synopsis = hit.overview || '';
+                if (hit.poster_path || hit.backdrop_path) data.poster = `https://image.tmdb.org/t/p/w500${hit.poster_path || hit.backdrop_path}`;
+                const d = hit.release_date || hit.first_air_date || '';
+                data.year = d ? String(d).slice(0, 4) : '';
+            }
+        }
+    } catch (e) { /* 忽略，返回降级数据(仅剧名) */ }
+
+    if (previewCache.size >= PREVIEW_CACHE_MAX) {
+        const firstKey = previewCache.keys().next().value;
+        if (firstKey !== undefined) previewCache.delete(firstKey);
+    }
+    const ttl = (data.synopsis || data.poster) ? PREVIEW_CACHE_TTL : PREVIEW_MISS_TTL;
+    previewCache.set(name, { data, expiry: Date.now() + ttl });
+
+    res.set('Cache-Control', 'public, max-age=3600');
+    return res.json(data);
+});
+
+// ========== API: /api/danmaku ==========
+// 🗨️ 弹幕代理：剧名+集名 → 自建 danmu_api(兼容弹弹play，聚合主流平台弹幕) → 转 DPlayer v3 格式。
+//   DPlayer 会 GET /api/danmaku/v3/?id=<剧名|集名>。需配置 DANMU_API_URL；未配置则返回空弹幕(优雅降级)。
+const danmakuCache = new Map();
+const danmakuSearchCache = new Map(); // norm(剧名) -> { animes, expiry } 同剧各集复用搜索结果
+const DANMAKU_CACHE_TTL = 30 * 60 * 1000;
+const DANMAKU_MISS_TTL = 90 * 1000; // 空结果只缓存 90s：弹幕空多为上游限流瞬时失败，短缓存让下次很快重试成功
+const DANMAKU_CACHE_MAX = 1000;
+const DANMAKU_MAX = 12000; // 单集弹幕上限(超出按时间均匀采样)。提到 1.2w 让峰值更密、"海量弹幕"开关效果明显
+const DANMAKU_SEARCH_TTL = 3 * 60 * 1000; // danmu_api 的 episodeId 会过期(实测<10min)，搜索结果只短存，防复用过期id取到空弹幕
+let danmakuWinStart = 0, danmakuWinCount = 0;
+function danmakuBudgetOk() {
+    const now = Date.now();
+    if (now - danmakuWinStart > 60000) { danmakuWinStart = now; danmakuWinCount = 0; }
+    if (danmakuWinCount >= 300) return false;
+    danmakuWinCount++;
+    return true;
+}
+function dandanToDplayer(comments) {
+    const modeMap = { '1': 0, '6': 0, '5': 1, '4': 2 };
+    const out = [];
+    for (const c of (comments || [])) {
+        const p = String(c.p || '').split(',');
+        if (p.length < 3) continue;
+        const t = parseFloat(p[0]);
+        if (!isFinite(t)) continue;
+        out.push([t, (modeMap[p[1]] != null ? modeMap[p[1]] : 0), parseInt(p[2], 10) || 16777215, '', String(c.m || '')]);
+    }
+    return out;
+}
+function danmakuEpNum(s) {
+    const m = String(s || '').match(/第\s*0*(\d+)\s*[集话話期]/);
+    if (m) return parseInt(m[1], 10);
+    const m2 = String(s || '').match(/\d+/);
+    return m2 ? parseInt(m2[0], 10) : null;
+}
+function pickDanmakuEpisode(episodes, epName) {
+    if (!episodes || !episodes.length) return null;
+    const n = epName ? danmakuEpNum(epName) : null;
+    if (n != null) {
+        const byTitle = episodes.find(e => danmakuEpNum(e.episodeTitle) === n);
+        if (byTitle) return byTitle;
+        if (n >= 1 && n <= episodes.length) return episodes[n - 1];
+        return null;  // 集号超出弹幕源集数 → 返回空，别错放第1集弹幕
+    }
+    return episodes[0];
+}
+// 从【一个 danmu_api 实例】取某剧某集弹幕：搜索 → 同剧多平台回退 → 返回 DPlayer 数组(空=没取到)
+async function fetchDanmakuFromInstance(base, token, title, ep) {
+    base = String(base).replace(/\/$/, '');
+    const prefix = token ? `/${encodeURIComponent(token)}` : '';
+    const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+    const core = s => norm(String(s || '').split(/[(（【\[]/)[0]);
+    const nt = norm(title), ct = core(title);
+    let animes;
+    const skey = base + '||' + nt; // 按 实例+剧名 缓存(不同实例 episodeId 不同，key 必须带 base)
+    const sc = danmakuSearchCache.get(skey);
+    if (sc && sc.expiry > Date.now()) { animes = sc.animes; }
+    else {
+        const sr = await axios.get(`${base}${prefix}/api/v2/search/episodes`, { params: { anime: title }, timeout: 20000 });
+        animes = (sr.data && sr.data.animes) || [];
+        if (danmakuSearchCache.size >= 500) { const k = danmakuSearchCache.keys().next().value; if (k !== undefined) danmakuSearchCache.delete(k); }
+        danmakuSearchCache.set(skey, { animes, expiry: Date.now() + DANMAKU_SEARCH_TTL });
+    }
+    let candidates = animes.filter(a => core(a.animeTitle) === ct);
+    if (!candidates.length) candidates = animes.filter(a => norm(a.animeTitle) === nt);
+    if (!candidates.length) candidates = animes.filter(a => core(a.animeTitle).includes(ct) || ct.includes(core(a.animeTitle)));
+    if (!candidates.length && animes.length) candidates = [animes[0]];
+    const platOf = s => { const m = String(s || '').match(/from\s+([a-z0-9]+)/i); return m ? m[1].toLowerCase() : ''; };
+    const PLAT_RANK = { iqiyi: 0, qq: 1, tencent: 1, youku: 2, bilibili: 3, mango: 4, imgo: 4, '360': 5, migu: 9 };
+    candidates.sort((a, b) => (PLAT_RANK[platOf(a.animeTitle)] ?? 6) - (PLAT_RANK[platOf(b.animeTitle)] ?? 6));
+    for (let tries = 0; tries < candidates.length && tries < 3; tries++) {
+        const episode = pickDanmakuEpisode(candidates[tries].episodes, ep);
+        if (!episode || !episode.episodeId) continue;
+        try {
+            const cr = await axios.get(`${base}${prefix}/api/v2/comment/${episode.episodeId}`, { params: { withRelated: 'true', chConvert: '0' }, timeout: 25000 });
+            const d = dandanToDplayer((cr.data && cr.data.comments) || []);
+            if (d.length) return d;
+        } catch (e) { }
+    }
+    return [];
+}
+app.get('/api/danmaku/v3/', async (req, res) => {
+    const empty = { code: 0, version: 3, data: [], msg: '' };
+    // 默认短缓存(空/出错 5min)；非空弹幕→7天新鲜+30天 stale-while-revalidate(过期先回旧缓存、后台重抓)。
+    // 缓存加在本接口(键=?id=剧名|集名,稳定)，勿缓存 danmu_api 的 comment/{id}(id会过期)
+    const LONG_CACHE = 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=2592000';
+    res.set('Cache-Control', 'public, max-age=90');
+    const DANMU_API_URL = process.env.DANMU_API_URL;
+    if (!DANMU_API_URL) return res.json(empty);
+
+    let title = '', ep = '';
+    try { const parts = String(req.query.id || '').split('|'); title = (parts[0] || '').trim(); ep = (parts[1] || '').trim(); } catch (e) { }
+    if (!title) return res.json(empty);
+
+    const cacheKey = title + '|' + ep;
+    const cached = danmakuCache.get(cacheKey);
+    if (cached && cached.expiry > Date.now()) { if (cached.data.length) res.set('Cache-Control', LONG_CACHE); return res.json({ code: 0, version: 3, data: cached.data, msg: '' }); }
+    if (!danmakuBudgetOk()) return res.json(empty);
+
+    try {
+        // 多源回退：DANMU_API_URL 逗号分隔多个实例(不同出口IP绕开限流)；DANMU_API_TOKEN 逗号分隔配对或单 token 共用
+        const bases = String(DANMU_API_URL).split(',').map(s => s.trim()).filter(Boolean);
+        const tokens = String(process.env.DANMU_API_TOKEN || '').split(',').map(s => s.trim());
+        const instances = bases.map((b, i) => ({ base: b, token: tokens.length > 1 ? (tokens[i] || '') : (tokens[0] || '') }));
+        let data = [];
+        for (const inst of instances) {
+            try { data = await fetchDanmakuFromInstance(inst.base, inst.token, title, ep); } catch (e) { data = []; }
+            if (data.length) break;
+        }
+        // 全部实例空 → 多为上游限流瞬时空：等 3s 重试第一个实例(Vercel 有 10s 函数上限，谨慎)
+        if (!data.length && instances.length) {
+            await new Promise(r => setTimeout(r, 3000));
+            try { data = await fetchDanmakuFromInstance(instances[0].base, instances[0].token, title, ep); } catch (e) { data = []; }
+        }
+        data.sort((a, b) => a[0] - b[0]); // 先按时间升序，保证下面按索引均匀采样=按时间均匀采样(后半段不丢)
+        if (data.length > DANMAKU_MAX) { const step = data.length / DANMAKU_MAX, s = []; for (let i = 0; i < DANMAKU_MAX; i++) s.push(data[Math.floor(i * step)]); data = s; }
+        if (danmakuCache.size >= DANMAKU_CACHE_MAX) { const k = danmakuCache.keys().next().value; if (k !== undefined) danmakuCache.delete(k); }
+        danmakuCache.set(cacheKey, { data, expiry: Date.now() + (data.length ? DANMAKU_CACHE_TTL : DANMAKU_MISS_TTL) });
+        if (data.length) res.set('Cache-Control', LONG_CACHE);
+        return res.json({ code: 0, version: 3, data, msg: '' });
+    } catch (e) {
+        console.error('[弹幕] 获取失败:', e.message);
+        return res.json(empty);
+    }
+});
+app.post('/api/danmaku/v3/', (req, res) => res.json({ code: 0, msg: '' }));
+
 // ========== API: /api/config ==========
 app.get('/api/config', (req, res) => {
     const userToken = req.query.token || '';
@@ -183,102 +426,21 @@ app.get('/api/config', (req, res) => {
         tmdb_proxy_url: TMDB_PROXY_URL,
         enable_local_image_cache: false, // Vercel 不支持本地缓存
         sync_enabled: syncEnabled,
-        multi_user_mode: ACCESS_PASSWORDS.length > 1
+        multi_user_mode: ACCESS_PASSWORDS.length > 1,
+        danmaku_enabled: !!process.env.DANMU_API_URL  // 🗨️ 弹幕开关
     });
 });
 
-// ========== API: /api/debug ==========
-app.get('/api/debug', async (req, res) => {
-    // 尝试加载远程配置以显示状态
-    let dbStatus = 'not_configured';
-    let sitesCount = 0;
-    let dbError = null;
-
-    // 优先检查嵌入配置
-    if (EMBEDDED_SITES) {
-        dbStatus = 'embedded';
-        sitesCount = EMBEDDED_SITES.sites?.length || 0;
-    } else if (REMOTE_DB_URL) {
-        try {
-            if (remoteDbCache) {
-                dbStatus = 'cached';
-                sitesCount = remoteDbCache.sites?.length || 0;
-            } else {
-                const response = await axios.get(REMOTE_DB_URL, { timeout: 5000 });
-                if (response.data && Array.isArray(response.data.sites)) {
-                    dbStatus = 'loaded';
-                    sitesCount = response.data.sites.length;
-                    // 更新缓存
-                    remoteDbCache = response.data;
-                    remoteDbLastFetch = Date.now();
-                } else {
-                    dbStatus = 'invalid_format';
-                }
-            }
-        } catch (err) {
-            dbStatus = 'fetch_failed';
-            dbError = err.message;
-        }
-    }
-
+// ========== API: /api/debug (健康检查；不再泄露 env 状态/密钥/REMOTE_DB_URL 等敏感信息) ==========
+app.get('/api/debug', (req, res) => {
     res.json({
+        status: 'ok',
         environment: 'Vercel Serverless',
-        node_version: process.version,
-        env_status: {
-            TMDB_API_KEY: TMDB_API_KEY ? 'configured' : 'missing',
-            TMDB_PROXY_URL: TMDB_PROXY_URL ? 'configured' : 'not_set',
-            ACCESS_PASSWORD: ACCESS_PASSWORDS.length > 0 ? `${ACCESS_PASSWORDS.length} password(s)` : 'not_set',
-            REMOTE_DB_URL: REMOTE_DB_URL ? 'configured' : 'not_set',
-            SITES_JSON: EMBEDDED_SITES ? `embedded (${EMBEDDED_SITES.sites?.length} sites)` : 'not_set'
-        },
-        // 新增：原始环境变量检测（帮助诊断配置问题）
-        raw_env_check: {
-            SITES_JSON_exists: !!process.env['SITES_JSON'],
-            SITES_JSON_length: process.env['SITES_JSON']?.length || 0,
-            REMOTE_DB_URL_exists: !!process.env['REMOTE_DB_URL'],
-            REMOTE_DB_URL_length: process.env['REMOTE_DB_URL']?.length || 0
-        },
-        remote_db: {
-            status: dbStatus,
-            sites_count: sitesCount,
-            error: dbError,
-            url_preview: REMOTE_DB_URL ? REMOTE_DB_URL.substring(0, 50) + '...' : null
-        },
-        cache_type: 'memory',
         timestamp: new Date().toISOString()
     });
 });
 
-// ========== API: /api/env-test (直接测试环境变量读取) ==========
-// 这个端点在请求时直接读取 process.env，而不是使用模块加载时的变量
-// 用于诊断 Vercel 环境变量配置问题
-app.get('/api/env-test', (req, res) => {
-    // 直接在请求时读取，而不是用模块级变量
-    const envCheck = {
-        TMDB_API_KEY: process.env.TMDB_API_KEY ? `configured (${process.env.TMDB_API_KEY.length} chars)` : 'NOT_SET',
-        REMOTE_DB_URL: process.env['REMOTE_DB_URL'] ? `configured (${process.env['REMOTE_DB_URL'].length} chars)` : 'NOT_SET',
-        TMDB_PROXY_URL: process.env['TMDB_PROXY_URL'] ? `configured (${process.env['TMDB_PROXY_URL'].length} chars)` : 'NOT_SET',
-        ACCESS_PASSWORD: process.env['ACCESS_PASSWORD'] ? `configured (${process.env['ACCESS_PASSWORD'].length} chars)` : 'NOT_SET',
-        SITES_JSON: process.env['SITES_JSON'] ? `configured (${process.env['SITES_JSON'].length} chars)` : 'NOT_SET'
-    };
-
-    // 列出所有环境变量的 key（不显示值，保护隐私）
-    const allEnvKeys = Object.keys(process.env).filter(k =>
-        !k.startsWith('npm_') &&
-        !k.startsWith('PATH') &&
-        !k.includes('SECRET') &&
-        !k.includes('KEY') &&
-        !k.includes('PASSWORD')
-    ).sort();
-
-    res.json({
-        message: '这是直接在请求时读取的环境变量状态',
-        env_at_request_time: envCheck,
-        all_env_keys_sample: allEnvKeys.slice(0, 30),
-        total_env_count: Object.keys(process.env).length,
-        timestamp: new Date().toISOString()
-    });
-});
+// 注：原 /api/env-test 诊断端点会泄露密码长度、环境变量 key 列表等敏感信息，已移除。
 
 // ========== API: /api/auth/check ==========
 app.get('/api/auth/check', (req, res) => {
@@ -374,8 +536,8 @@ app.get('/api/tmdb-image/:size/:filename', async (req, res) => {
     const { size, filename } = req.params;
     const allowSizes = ['w300', 'w342', 'w500', 'w780', 'w1280', 'original'];
 
-    // 安全检查
-    if (!allowSizes.includes(size) || !/^[a-zA-Z0-9_\-\.]+$/.test(filename)) {
+    // 安全检查：size 走白名单；filename 只允许 TMDB 实际格式 <字母数字>.<jpg/png/webp>，杜绝 '..' 路径穿越
+    if (!allowSizes.includes(size) || !/^[A-Za-z0-9]+\.(jpg|jpeg|png|webp)$/i.test(filename)) {
         return res.status(400).send('Invalid parameters');
     }
 

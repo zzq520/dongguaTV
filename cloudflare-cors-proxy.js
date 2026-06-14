@@ -111,8 +111,35 @@ async function handleProxyRequest(request, targetUrlParam, currentOrigin) {
         // 设置超时 (20秒，视频流需要更长时间)
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
-        const response = await fetch(proxyRequest, { signal: controller.signal });
+        let response = await fetch(proxyRequest, { signal: controller.signal });
         clearTimeout(timeoutId);
+
+        // 📊 诊断日志(wrangler tail 可见)：只对失败请求打点(不刷屏成功的 .ts 分段)。
+        //    server=cloudflare + 403 ⇒ 上游本身在 CF 后面、在封你 worker 的 IP(换头救不了)；404 ⇒ 链接失效/被按 IP 拒。
+        if (!response.ok) {
+            console.log(`[proxy] ${request.method} ${targetURL.host}${targetURL.pathname} first=${response.status} server=${response.headers.get('server') || '-'} cf-cache=${response.headers.get('cf-cache-status') || '-'} ct=${response.headers.get('content-type') || '-'}`);
+        }
+
+        // 🔁 防盗链回退：部分 CDN 带"外来 Referer/Origin"反而被拒(常见 403，也有用 404/401 隐藏的)。
+        //    失败时去掉 Referer/Origin 再拉一次(仅 GET/HEAD、仅在失败时；成功才采用，否则保留首次结果)。
+        //    注意：对"封 Cloudflare/境外 IP"的源无效(那是 IP 问题，换头救不了)，但能多救回"仅因 Referer 被拒"的源。
+        if ([401, 403, 404, 451].includes(response.status) &&
+            (request.method === 'GET' || request.method === 'HEAD')) {
+            const retryHeaders = new Headers(headers);
+            retryHeaders.delete('Referer');
+            retryHeaders.delete('Origin');
+            const retryController = new AbortController();
+            const retryTimeoutId = setTimeout(() => retryController.abort(), 20000);
+            try {
+                const retryResp = await fetch(
+                    new Request(targetURL.toString(), { method: request.method, headers: retryHeaders }),
+                    { signal: retryController.signal }
+                );
+                console.log(`[proxy] ${targetURL.host}${targetURL.pathname} noRefererRetry status=${retryResp.status} adopted=${retryResp.ok}`);
+                if (retryResp.ok) response = retryResp;
+            } catch (e) { console.log(`[proxy] ${targetURL.host}${targetURL.pathname} noRefererRetry threw ${e.name}`); /* 保留首次响应交给前端自动换源 */ }
+            clearTimeout(retryTimeoutId);
+        }
 
         // 构建响应头 - 先复制目标服务器的响应头，但排除 CORS 相关的头
         const responseHeaders = new Headers();
@@ -155,9 +182,9 @@ async function handleProxyRequest(request, targetUrlParam, currentOrigin) {
             const rewrittenContent = rewriteM3u8(m3u8Content, targetURL, currentOrigin);
 
             responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-            responseHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
             responseHeaders.delete('Content-Length'); // 长度已变化
 
+            console.log(`[proxy] ${targetURL.host}${targetURL.pathname} FINAL=${response.status} m3u8=true`);
             return new Response(rewrittenContent, {
                 status: response.status,
                 statusText: response.statusText,
@@ -165,11 +192,7 @@ async function handleProxyRequest(request, targetUrlParam, currentOrigin) {
             });
         }
 
-        // 非 m3u8 响应也禁止缓存错误状态码（防止 403 被浏览器缓存）
-        if (!response.ok) {
-            responseHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-        }
-
+        if (!response.ok) console.log(`[proxy] ${targetURL.host}${targetURL.pathname} FINAL=${response.status} m3u8=false`);
         return new Response(response.body, {
             status: response.status,
             statusText: response.statusText,

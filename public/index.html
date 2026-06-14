@@ -61,7 +61,7 @@
     <!-- SW 版本检测和强制更新（必须在最开头） -->
     <script data-cfasync="false">
         (function () {
-            var REQUIRED_SW_VERSION = 'v23';
+            var REQUIRED_SW_VERSION = 'v24';
             var STORAGE_KEY = 'sw_cleared_' + REQUIRED_SW_VERSION;
 
             // 如果已经为这个版本清理过，不再重复
@@ -117,6 +117,13 @@
     <link rel="icon" href="icon.png" type="image/png">
     <meta name="theme-color" content="#141414">
 
+    <!-- iOS PWA 支持（iOS 不读 manifest，需要这些 meta 才能添加到主屏并全屏） -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="E视界">
+    <link rel="apple-touch-icon" href="icon.png">
+
     <!-- 关键 CSS (优先加载) -->
     <link href="libs/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="libs/css/fontawesome.min.css">
@@ -134,6 +141,40 @@
     <script data-cfasync="false" src="libs/js/bootstrap.bundle.min.js" defer></script>
 
     <style>
+        /* ♿ 尊重用户的"减少动态效果"系统偏好：大幅削弱动画/过渡，
+           缓解前庭功能障碍/晕动症用户的不适（保留极短时长以不破坏交互反馈） */
+        @media (prefers-reduced-motion: reduce) {
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+
+            /* 🛡️ 弹幕是核心内容(非装饰动画)：即便用户系统开启"减少动态效果"，弹幕也必须正常滚动，
+               否则上面的 0.01ms 会让弹幕瞬间跳到屏幕外消失(看似"弹幕完全不显示")。这里恢复其滚动时长。 */
+            .dplayer-danmaku .dplayer-danmaku-item.dplayer-danmaku-move,
+            .dplayer-danmaku .dplayer-danmaku-right.dplayer-danmaku-move {
+                animation-duration: 8s !important;
+                animation-iteration-count: 1 !important;
+            }
+            .dplayer-danmaku .dplayer-danmaku-top.dplayer-danmaku-move,
+            .dplayer-danmaku .dplayer-danmaku-bottom.dplayer-danmaku-move {
+                animation-duration: 6s !important;
+                animation-iteration-count: 1 !important;
+            }
+        }
+        /* 🔗 分享面板社交按钮（YouTube 风格） */
+        .share-soc { background:none; border:none; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:7px; min-width:62px; color:#bbb; font-size:12px; padding:0; flex:0 0 auto; }
+        .share-soc .ico { width:50px; height:50px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:23px; color:#fff; transition:transform .15s; }
+        .share-soc:hover .ico { transform:scale(1.08); }
+        .share-soc:hover { color:#fff; }
+        .share-soc-row { display:flex; gap:14px; overflow-x:auto; padding:4px 2px 16px; -webkit-overflow-scrolling:touch; }
+        .share-soc-row::-webkit-scrollbar { height:0; }
+
         :root {
             --bg-color: #141414;
             --panel-bg: #1f1f1f;
@@ -347,6 +388,138 @@
             overflow: hidden;
         }
 
+        /* 🗨️ 弹幕显示区域/字号/速度 由 CSS 变量控制(齿轮菜单里可调)，默认区域顶部 1/4(不挡脸)。
+           DPlayer 按容器 offsetHeight 算轨道数，限容器高=限弹幕区域。#dplayer 前缀提高优先级，
+           连 reduced-motion 的 animation-duration:0.01ms 也压得住(速度才可控)。 */
+        #dplayer .dplayer-danmaku {
+            height: var(--dm-area, 25%) !important;
+            bottom: auto !important;
+            font-size: var(--dm-fontsize, 22px) !important;
+            font-family: var(--dm-fontfamily, inherit) !important;
+        }
+        /* 字体选择子列表(点"字体"行展开，每项用各自字体显示) */
+        #dplayer .dm-font-list {
+            display: none;
+            margin: 4px 0 8px;
+            max-height: 168px;
+            overflow-y: auto;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.06);
+        }
+        #dplayer .dm-font-list.open {
+            display: block;
+        }
+        #dplayer .dm-font-item {
+            padding: 7px 12px;
+            font-size: 14px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        #dplayer .dm-font-item:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+        #dplayer .dm-font-item.dm-font-cur {
+            color: #ff5566;
+        }
+        #dplayer .dm-set-arrow {
+            margin-left: auto;
+            opacity: 0.7;
+            font-size: 11px;
+        }
+        #dplayer .dplayer-danmaku .dplayer-danmaku-item.dplayer-danmaku-move {
+            animation-duration: var(--dm-dur, 8s) !important;
+        }
+        /* 🗨️ 独立的弹幕设置滑块面板 */
+        #dplayer .dm-settings-panel {
+            position: absolute;
+            bottom: 56px;
+            right: 12px;
+            z-index: 25;
+            width: 250px;
+            background: rgba(20, 20, 22, 0.94);
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 12px 14px;
+            color: #fff;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+        }
+        #dplayer .dm-set-title {
+            font-size: 13px;
+            font-weight: 600;
+            opacity: 0.9;
+            margin-bottom: 10px;
+        }
+        #dplayer .dm-set-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 11px 0;
+        }
+        #dplayer .dm-set-label {
+            white-space: nowrap;
+            width: 56px;
+            flex-shrink: 0;
+            font-size: 12px;
+            opacity: 0.85;
+        }
+        #dplayer .dm-set-range {
+            flex: 1;
+            min-width: 0;
+            height: 4px;
+            accent-color: #e50914;
+            cursor: pointer;
+        }
+        #dplayer .dm-set-val {
+            width: 44px;
+            text-align: right;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            opacity: 0.8;
+            flex-shrink: 0;
+        }
+        /* 弹幕面板里的开关(显示弹幕/海量弹幕) */
+        #dplayer .dm-toggle {
+            position: relative;
+            width: 40px;
+            height: 22px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            transition: background 0.25s;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        #dplayer .dm-toggle.dm-on {
+            background: #e50914;
+        }
+        #dplayer .dm-toggle .dm-knob {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+            transition: transform 0.25s;
+        }
+        #dplayer .dm-toggle.dm-on .dm-knob {
+            transform: translateX(18px);
+        }
+        /* 弹幕的原生齿轮项(显示弹幕/海量弹幕/弹幕透明度)已移到独立弹幕设置面板 → 齿轮里隐藏 */
+        #dplayer .dplayer-setting-showdan,
+        #dplayer .dplayer-setting-danunlimit,
+        #dplayer .dplayer-setting-danmaku {
+            display: none !important;
+        }
+        /* 全屏拆成两个常驻按钮：页面全屏(左) + 真全屏(右)，不再 hover 才显示 */
+        #dplayer .dplayer-controller .dplayer-icons .dplayer-full .dplayer-full-in-icon {
+            position: static !important;
+            top: auto !important;
+            display: inline-block !important;
+        }
+
         /* 1. 毛玻璃控制栏效果 */
         .dplayer-controller {
             background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.4) 60%, transparent 100%) !important;
@@ -363,6 +536,61 @@
         .dplayer-bar-wrap {
             height: 4px !important;
             transition: none !important;
+            /* 📱 拖进度条时禁止浏览器把触摸抢去滚动页面(否则手机上 touchmove 被取消=拖不动) */
+            touch-action: none;
+        }
+
+        /* 📱 手机/触屏：进度条与控制按钮等比例放大(屏幕小手指粗，4px 进度条根本按不到) */
+        @media (pointer: coarse), (max-width: 768px) {
+            #dplayer .dplayer-bar-wrap {
+                height: 6px !important;
+                padding: 14px 0 !important;
+                /* padding 撑大命中区(~34px)，视觉条仍是 6px；bottom 上移避免叠住按钮 */
+                bottom: 36px !important;
+                background-clip: content-box;
+            }
+            #dplayer .dplayer-bar {
+                height: 6px !important;
+            }
+            #dplayer .dplayer-bar-wrap .dplayer-thumb {
+                transform: scale(2) !important;
+            }
+            #dplayer .dplayer-controller {
+                height: 52px !important;
+            }
+            #dplayer .dplayer-icons {
+                height: 48px !important;
+            }
+            #dplayer .dplayer-icons .dplayer-icon {
+                width: 46px !important;
+            }
+            #dplayer .dplayer-icons .dplayer-icon i {
+                font-size: 20px !important;
+            }
+        }
+
+        /* 📱 音量/亮度滑动手势指示器 */
+        #dplayer .gesture-indicator {
+            position: absolute;
+            top: 18%;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 30;
+            background: rgba(0, 0, 0, 0.65);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            white-space: nowrap;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+
+        #dplayer .gesture-indicator.show {
+            opacity: 1;
+            visibility: visible;
         }
 
         /* 3. 进度条拖动点 - 发光效果 */
@@ -1267,19 +1495,23 @@
         .search-box-wrapper {
             pointer-events: auto;
             background: rgba(20, 20, 20, 0.95);
-            /* 加深背景，防止透视干扰 */
+            /* 加深背景，防止透视干扰（背景已 95% 不透明，强模糊几乎不可见却昂贵，降到 8px 省重绘） */
             border: 1px solid rgba(255, 255, 255, 0.15);
-            backdrop-filter: blur(20px);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             border-radius: 50px;
             /* 更圆润 */
             display: flex;
             align-items: center;
-            transition: 0.3s;
+            /* 仅过渡实际变化的属性，避免 transition:all 在 focus/compact 时跟踪并重算所有属性 */
+            transition: max-width 0.3s, height 0.3s, background-color 0.3s, border-color 0.3s;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
             width: 100%;
             /* 撑满 */
             max-width: none;
             margin: 0 auto;
+            /* 提升为独立合成层，使 :focus-within 重绘隔离，不连累背后长页面 */
+            will-change: transform;
         }
 
         .search-box-wrapper.compact {
@@ -1502,6 +1734,12 @@
             display: flex;
             gap: 14px;
             overflow-x: auto;
+            /* overflow-x:auto 会让 overflow-y 计算成 auto(纵向裁剪)，hover 放大的卡片顶部+发光会被切成硬边。
+               (overflow-clip-margin 在 x 为 auto 时对 y 无效，故只能用内边距留白。)
+               顶部留出 38px(放大 1.08 + 发光实际向上延伸约 36px)，让发光自然淡出到透明而非被切一刀；
+               配 margin-top:-24px 适度上移，仅在标题与卡片间多出约 14px 间距，且不与上方标题重叠。 */
+            padding-top: 38px;
+            margin-top: -24px;
             padding-bottom: 20px;
             scroll-behavior: smooth;
             /* 添加滚动捕捉，让滚动更自然 */
@@ -1587,6 +1825,15 @@
             z-index: 10;
             /* 优化：仅在 hover 时启用 will-change */
             will-change: transform;
+        }
+
+        /* 🌟 弹出高亮：海报红色描边环 + 外发光 + 抬升投影（纯 paint，z-index 已抬升盖过相邻卡片，不重排兄弟节点） */
+        .hot-card:hover .poster-wrap {
+            box-shadow:
+                0 14px 32px rgba(0, 0, 0, 0.7),
+                0 0 0 2px var(--accent),
+                0 0 22px 3px rgba(229, 9, 20, 0.5);
+            border-color: rgba(255, 255, 255, 0.35);
         }
 
         /* 历史卡片 - 不随 hover 缩放，只有内容缩放 */
@@ -1692,6 +1939,7 @@
             position: relative;
             box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
             border: 1px solid var(--border);
+            transition: box-shadow 0.25s ease, border-color 0.25s ease;
         }
 
         /* 骨架屏闪烁动画 */
@@ -1890,6 +2138,136 @@
             border: 1px solid #333;
         }
 
+        /* ⏳ 深链/测速加载遮罩：视频起播前的加载指示(动态，明确告诉用户在加载而非卡死) */
+        .player-loading-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 15;
+        }
+
+        .player-loading-spinner {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: 4px solid rgba(229, 9, 20, 0.25);
+            border-top-color: #e50914;
+            animation: dl-spin 0.8s linear infinite;
+        }
+
+        @keyframes dl-spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .player-loading-text {
+            font-size: 14px;
+            color: #eee;
+            font-weight: 600;
+        }
+
+        .player-loading-sub {
+            font-size: 12px;
+            color: #9a9a9a;
+        }
+
+        .player-loading-dots i {
+            font-style: normal;
+            opacity: 0.2;
+            animation: dl-blink 1.2s infinite;
+        }
+
+        .player-loading-dots i:nth-child(2) { animation-delay: 0.2s; }
+        .player-loading-dots i:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes dl-blink {
+            0%, 100% { opacity: 0.2; }
+            50% { opacity: 1; }
+        }
+
+        /* 加载指示是功能性反馈：即使用户系统开启了"减少动态效果"，也保持转动，避免被误认为卡死 */
+        @media (prefers-reduced-motion: reduce) {
+            .player-loading-spinner {
+                animation: dl-spin 0.9s linear infinite !important;
+            }
+            .player-loading-dots i {
+                animation: dl-blink 1.2s infinite !important;
+            }
+        }
+
+        /* 🔒 未登录深链预览：播放器黑屏锁定遮罩 */
+        .preview-lock-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.85));
+            z-index: 20;
+        }
+
+        .preview-lock-card {
+            text-align: center;
+            padding: 24px;
+            max-width: 360px;
+        }
+
+        .preview-lock-card > .fa-lock {
+            font-size: 40px;
+            color: #e50914;
+            margin-bottom: 14px;
+        }
+
+        .preview-lock-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .preview-lock-sub {
+            font-size: 12px;
+            color: #bbb;
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        .preview-lock-btn {
+            background: linear-gradient(135deg, #e50914, #b00610);
+            color: #fff;
+            border: none;
+            border-radius: 22px;
+            padding: 10px 28px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(229, 9, 20, 0.4);
+        }
+
+        .preview-lock-btn:hover {
+            filter: brightness(1.08);
+        }
+
+        /* 🔒 线路/选集锁定占位提示 */
+        .preview-locked-note {
+            font-size: 13px;
+            color: #999;
+            padding: 14px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px dashed #444;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .preview-locked-note .fa-lock {
+            color: #e50914;
+            margin-right: 6px;
+        }
+
         /* 视频信息栏 */
         .video-header {
             display: flex;
@@ -1964,6 +2342,9 @@
 
         .source-pill {
             padding: 8px 16px;
+            min-height: 44px;
+            /* ♿ 移动端触控目标 ≥44px */
+            box-sizing: border-box;
             border-radius: 6px;
             background: #2a2a2a;
             border: 1px solid #333;
@@ -2003,6 +2384,12 @@
             border: 1px solid transparent;
             color: #ddd;
             padding: 12px 5px;
+            min-height: 44px;
+            /* ♿ 移动端触控目标 ≥44px */
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             text-align: center;
             border-radius: 6px;
             font-size: 14px;
@@ -2488,6 +2875,22 @@
             pointer-events: none;
         }
 
+        /* 🔗 深链未登录预览：登录框改半透明浮层，透出背景的播放框架(detail-overlay z-index:9999) */
+        .password-screen.deeplink-mode {
+            background: rgba(8, 8, 12, 0.72);
+            backdrop-filter: blur(6px);
+        }
+
+        #deeplink-login-close {
+            display: none;
+        }
+
+        .password-screen.deeplink-mode #deeplink-login-close {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         .password-container {
             background: rgba(30, 30, 40, 0.8);
             backdrop-filter: blur(20px);
@@ -2858,6 +3261,9 @@
 
     <!-- Password Protection Screen -->
     <div id="password-screen" class="password-screen" style="display: none;">
+        <!-- 🔗 深链预览模式下可关闭登录框，回看背景框架(仅 deeplink-mode 显示) -->
+        <button type="button" id="deeplink-login-close" onclick="dismissDeepLinkLogin()" aria-label="关闭"
+            style="position:absolute; top:18px; right:20px; background:rgba(255,255,255,0.12); border:none; color:#fff; width:40px; height:40px; border-radius:50%; font-size:22px; line-height:1; cursor:pointer; z-index:2;">&times;</button>
         <div class="password-container">
             <div class="password-logo">
                 <div class="password-logo-text" style="display: flex; align-items: center; justify-content: center;">
@@ -2896,14 +3302,14 @@
 
     <div id="app" v-cloak>
 
-        <nav class="navbar-custom" :class="{ 'scrolled': scrollY > 50 }" v-show="!searched">
+        <nav class="navbar-custom" v-show="!searched">
             <div class="brand" @click="goHome" style="cursor: pointer; display: flex; align-items: center;"><img
                     src="icon.png" style="height: 28px; margin-right: 6px; border-radius: 6px;">视界 <span
                     style="font-size:12px; color:#666; font-weight:normal; margin-left: 2px;">MAX</span></div>
         </nav>
 
         <!-- Back to Top Button -->
-        <button class="btn-top" :class="{ show: scrollY > 500 }" @click="scrollToTop">
+        <button class="btn-top" @click="scrollToTop">
             <i class="fas fa-arrow-up"></i>
         </button>
 
@@ -2935,14 +3341,15 @@
         <!-- 2. Search -->
         <div class="search-section"
             :style="{ marginTop: searched ? '60px' : '-35px', position: searched ? 'relative' : 'sticky' }">
-            <div class="search-box-wrapper" :class="{ 'compact': !searched && scrollY > 400 }">
+            <div class="search-box-wrapper" :class="{ 'compact': !searched && pastCompactThreshold }">
                 <i class="fas fa-search search-icon" @click="doSearch"></i>
                 <input type="text" v-model="keyword" @keyup.enter="doSearch" @input="debouncedSearch"
                     class="search-input" placeholder="输入片名或剧集名称...">
             </div>
         </div>
 
-        <div v-if="!searched">
+        <!-- 首页内容区：用 v-show 而非 v-if，进出搜索只切换 display，避免每次销毁/重建 ~400 张海报卡导致卡顿 -->
+        <div v-show="!searched">
             <!-- 🕐 观看历史 (最上方) -->
             <div class="section-container animate__animated animate__fadeInUp" v-if="watchHistory.length > 0"
                 style="margin-top: 60px; margin-bottom: 10px;">
@@ -2968,8 +3375,8 @@
 
                 <!-- 横向滚动 -->
                 <div class="scroll-container">
-                    <button class="scroll-btn left" v-show="historyCanScrollLeft" @click="scrollHistoryRow(-1)"><i
-                            class="fas fa-chevron-left"></i></button>
+                    <button class="scroll-btn left" v-show="historyCanScrollLeft" @click="scrollHistoryRow(-1)"
+                        aria-label="向左滚动观看历史"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
                     <div class="hot-row" ref="watchHistoryRow" @scroll="onHistoryScroll">
                         <div class="history-card" v-for="(item, index) in watchHistory" :key="item.name + index">
                             <!-- 删除按钮 (放在 card 外层避免随缩放移动) -->
@@ -2977,7 +3384,7 @@
                                 <i class="fas fa-times"></i>
                             </div>
                             <div class="poster-wrap" @click="playFromHistory(item)">
-                                <img :src="item.poster" :alt="item.name"
+                                <img :src="item.poster" :alt="item.name" decoding="async"
                                     @load="$event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
                                     @error="$event.target.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27150%27 height=%27225%27%3E%3Crect fill=%27%23333%27 width=%27150%27 height=%27225%27/%3E%3C/svg%3E'; $event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
                                     loading="lazy">
@@ -3002,8 +3409,8 @@
                             <div class="movie-date" style="font-size: 11px;">{{ formatWatchTime(item.watchedAt) }}</div>
                         </div>
                     </div>
-                    <button class="scroll-btn right" v-show="historyCanScrollRight" @click="scrollHistoryRow(1)"><i
-                            class="fas fa-chevron-right"></i></button>
+                    <button class="scroll-btn right" v-show="historyCanScrollRight" @click="scrollHistoryRow(1)"
+                        aria-label="向右滚动观看历史"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
                 </div>
             </div>
 
@@ -3049,13 +3456,13 @@
                 <template v-if="rowLists[key] && rowLists[key].length > 0">
                     <!-- 收起状态：横向滚动 -->
                     <div class="scroll-container" v-show="!expandedRows[key]">
-                        <button class="scroll-btn left" @click="scrollRow(key, -1)" v-show="rowLeftButtons[key]"><i
-                                class="fas fa-chevron-left"></i></button>
+                        <button class="scroll-btn left" @click="scrollRow(key, -1)" v-show="rowLeftButtons[key]"
+                            aria-label="向左滚动"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
                         <div class="hot-row" :ref="key" @scroll="onRowScroll(key)">
                             <div class="hot-card" v-for="item in rowLists[key]" :key="item.id"
                                 @click="autoSearch(item.title || item.name, item.original_title || item.original_name)">
                                 <div class="poster-wrap">
-                                    <img :src="getPosterUrl(item.poster_path)" loading="lazy"
+                                    <img :src="getPosterUrl(item.poster_path)" loading="lazy" decoding="async"
                                         @load="$event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')">
                                     <div class="rating-badge"><i class="fas fa-star text-warning"></i> {{
                                         item.vote_average
@@ -3067,15 +3474,15 @@
                                 </div>
                             </div>
                         </div>
-                        <button class="scroll-btn right" @click="scrollRow(key, 1)"><i
-                                class="fas fa-chevron-right"></i></button>
+                        <button class="scroll-btn right" @click="scrollRow(key, 1)" aria-label="向右滚动"><i
+                                class="fas fa-chevron-right" aria-hidden="true"></i></button>
                     </div>
                     <!-- 展开状态：分页网格布局 -->
                     <div class="grid-expanded" v-show="expandedRows[key]">
                         <div class="hot-card" v-for="item in getPagedItems(key)" :key="'grid-' + item.id"
                             @click="autoSearch(item.title || item.name, item.original_title || item.original_name)">
                             <div class="poster-wrap">
-                                <img :src="getPosterUrl(item.poster_path)"
+                                <img :src="getPosterUrl(item.poster_path)" loading="lazy" decoding="async"
                                     @load="$event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')">
                                 <div class="rating-badge"><i class="fas fa-star text-warning"></i> {{ item.vote_average
                                     ? item.vote_average.toFixed(1) : 'N/A' }}</div>
@@ -3104,7 +3511,7 @@
         </div>
 
         <!-- Search Results -->
-        <div id="search-result-anchor" class="section-container" v-if="searched">
+        <div id="search-result-anchor" class="section-container" v-show="searched">
             <div class="d-flex align-items-center gap-2 mb-5 mt-2">
                 <button class="btn btn-outline-secondary rounded-pill px-3 px-md-4 py-2" @click="goHome"
                     style="color: #fff; border-color: rgba(255,255,255,0.3);">
@@ -3121,7 +3528,7 @@
                 <div class="result-card" v-for="group in groupedList" :key="group.name" @click="openDetail(group)">
                     <div class="poster-wrap">
                         <img v-if="!isFallback(group.name)" :src="finalPoster(group)" :key="finalPoster(group)"
-                            referrerpolicy="no-referrer" loading="lazy"
+                            referrerpolicy="no-referrer" loading="lazy" decoding="async"
                             @load="$event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
                             @error="handleImgError(group.name); $event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')">
                         <div v-else class="poster-fallback">
@@ -3277,8 +3684,46 @@
 
         <!-- ★★★ 播放详情页 (影院布局) ★★★ -->
         <div class="detail-overlay" :class="{ active: showDetail }">
-            <div class="close-btn" tabindex="1" @click="closeDetail" @keydown.enter="closeDetail"><i
-                    class="fas fa-times"></i></div>
+            <div v-if="!previewLocked" class="close-btn" tabindex="1" role="button" aria-label="关闭" @click="closeDetail"
+                @keydown.enter="closeDetail"><i class="fas fa-times"></i></div>
+
+            <!-- 🔗 分享面板 -->
+            <div v-if="showSharePanel" @click.self="showSharePanel = false"
+                style="position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:2147483500; display:flex; align-items:center; justify-content:center; padding:20px;">
+                <div style="background:#1c1c1e; border:1px solid rgba(255,255,255,0.1); border-radius:16px; padding:22px; width:100%; max-width:480px; box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+                        <div style="font-size:16px; font-weight:bold; color:#fff;">
+                            <i class="fas fa-share-alt" style="color:#e50914; margin-right:8px;"></i>分享《{{ currentGroup && currentGroup.name }}》
+                        </div>
+                        <button @click="showSharePanel = false" aria-label="关闭" style="background:none; border:none; color:#888; font-size:22px; line-height:1; cursor:pointer;">&times;</button>
+                    </div>
+
+                    <!-- 社交平台快捷分享 -->
+                    <div class="share-soc-row">
+                        <button class="share-soc" @click="shareTo('wechat')"><span class="ico" style="background:#07c160;"><i class="fab fa-weixin"></i></span><div>微信</div></button>
+                        <button class="share-soc" @click="shareTo('qq')"><span class="ico" style="background:#12b7f5;"><i class="fab fa-qq"></i></span><div>QQ</div></button>
+                        <button class="share-soc" @click="shareTo('telegram')"><span class="ico" style="background:#229ed9;"><i class="fab fa-telegram"></i></span><div>Telegram</div></button>
+                        <button class="share-soc" @click="shareTo('whatsapp')"><span class="ico" style="background:#25d366;"><i class="fab fa-whatsapp"></i></span><div>WhatsApp</div></button>
+                        <button class="share-soc" @click="shareTo('facebook')"><span class="ico" style="background:#1877f2;"><i class="fab fa-facebook-f"></i></span><div>Facebook</div></button>
+                        <button class="share-soc" @click="shareTo('x')"><span class="ico" style="background:#000; border:1px solid #555;"><i class="fab fa-twitter"></i></span><div>X</div></button>
+                        <button class="share-soc" @click="shareTo('instagram')"><span class="ico" style="background:linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);"><i class="fab fa-instagram"></i></span><div>Instagram</div></button>
+                        <button class="share-soc" @click="shareTo('native')"><span class="ico" style="background:#444;"><i class="fas fa-ellipsis-h"></i></span><div>更多 App</div></button>
+                    </div>
+
+                    <!-- 复制链接 -->
+                    <div style="display:flex; gap:8px; margin-bottom:14px;">
+                        <input readonly :value="shareUrl" onclick="this.select()"
+                            style="flex:1; min-width:0; box-sizing:border-box; background:#2a2a2a; border:1px solid #3a3a3a; color:#ccc; border-radius:10px; padding:11px 12px; font-size:12px;">
+                        <button @click="confirmShare" style="background:linear-gradient(135deg,#e50914,#b00610); color:#fff; border:none; border-radius:10px; padding:11px 20px; font-weight:bold; cursor:pointer; white-space:nowrap;">复制</button>
+                    </div>
+
+                    <!-- 开始时间 -->
+                    <label v-if="shareSeconds > 0" style="display:flex; align-items:center; gap:8px; cursor:pointer; color:#ddd; font-size:13px;">
+                        <input type="checkbox" v-model="shareIncludeTime" style="width:16px; height:16px; accent-color:#e50914;">
+                        <span>开始时间 <b style="color:#fff;">{{ formatSeconds(shareSeconds) }}</b></span>
+                    </label>
+                </div>
+            </div>
 
             <div class="player-layout" v-if="currentGroup">
 
@@ -3287,17 +3732,43 @@
                     <div>
                         <h1 class="video-title">{{ currentGroup.name }}</h1>
                         <div class="video-meta">
-                            正在播放: <span class="text-white fw-bold">{{ currentSource && currentSource.site_name }}</span>
+                            <template v-if="previewLocked"><i class="fas fa-lock" style="color:#e50914;"></i> 登录后即可观看</template>
+                            <template v-else-if="currentSource">正在播放: <span class="text-white fw-bold">{{ currentSource.site_name }}</span></template>
+                            <template v-else><i class="fas fa-spinner fa-spin"></i> 正在加载…</template>
                         </div>
                     </div>
-                    <button class="btn-cast" tabindex="2" @click="castVideo">
-                        <i class="fas fa-tv"></i> 一键投屏
-                    </button>
+                    <div v-if="!previewLocked" style="display: flex; gap: 10px; align-items: center;">
+                        <button class="btn-cast" tabindex="2" @click="openSharePanel" aria-label="分享">
+                            <i class="fas fa-share-alt"></i> 分享
+                        </button>
+                        <button class="btn-cast" tabindex="2" @click="castVideo">
+                            <i class="fas fa-tv"></i> 一键投屏
+                        </button>
+                    </div>
                 </div>
 
                 <!-- 2. 中部：超大播放器 -->
-                <div class="player-box" style="position: relative;">
+                <div class="player-box" style="position: relative;"
+                    :style="previewLocked && currentGroup && currentGroup.pic ? { backgroundImage: 'url(' + currentGroup.pic + ')', backgroundSize: 'cover', backgroundPosition: 'center' } : {}">
                     <div id="dplayer" style="width: 100%; height: 100%;"></div>
+                    <!-- ⏳ 深链/测速加载态：视频起播前在播放器区域显示加载指示，避免黑屏空等 -->
+                    <div v-if="!previewLocked && !currentUrl && !autoRetryMessage && (deepLinkLoading || isTestingSources || loadingDetail)"
+                        class="player-loading-overlay">
+                        <div class="player-loading-spinner"></div>
+                        <div class="player-loading-text">正在为你加载播放线路<span class="player-loading-dots"><i>.</i><i>.</i><i>.</i></span></div>
+                        <div v-if="deepLinkLoading && deepLinkSourceCount > 0" class="player-loading-sub">已找到 {{ deepLinkSourceCount }} 个线路，正在挑选可播放的最快线路…</div>
+                        <div v-else-if="deepLinkLoading" class="player-loading-sub">正在搜索可用线路…</div>
+                        <div v-else class="player-loading-sub">正在测试各线路可用性…</div>
+                    </div>
+                    <!-- 🔒 未登录深链预览：黑屏播放器锁定遮罩 -->
+                    <div v-if="previewLocked" class="preview-lock-overlay">
+                        <div class="preview-lock-card">
+                            <i class="fas fa-lock"></i>
+                            <div class="preview-lock-title">登录后即可观看</div>
+                            <div class="preview-lock-sub">登录后即可解锁完整高清播放</div>
+                            <button class="preview-lock-btn" @click="promptLogin">立即登录</button>
+                        </div>
+                    </div>
                     <!-- 自动切换线路提示 -->
                     <div v-if="autoRetryMessage" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                                background: rgba(0,0,0,0.9); padding: 20px 30px; border-radius: 10px; 
@@ -3317,7 +3788,7 @@
                         <p
                             style="color: #999; font-size: 13px; line-height: 1.7; max-height: 80px; overflow-y: auto; margin: 0;">
                             <span v-if="loadingDetail"><i class="fas fa-spinner fa-spin"></i> 加载中...</span>
-                            <span v-else>{{ stripHtml(currentSource.vod_content) || '暂无简介信息' }}</span>
+                            <span v-else>{{ stripHtml(currentSource.vod_content) || (previewLocked ? '登录后查看完整简介' : '暂无简介信息') }}</span>
                         </p>
                     </div>
 
@@ -3329,7 +3800,7 @@
                                 style="font-size: 12px; color: #888; font-weight: normal; margin-left: 10px;">
                                 <i class="fas fa-spinner fa-spin"></i> 正在测速...
                             </span>
-                            <span v-else @click="refreshSources"
+                            <span v-else-if="!previewLocked" @click="refreshSources"
                                 style="margin-left: 10px; font-size: 12px; color: #888; cursor: pointer; padding: 2px 8px; border-radius: 4px; border: 1px solid #444; transition: all 0.2s;"
                                 :style="{ opacity: refreshingSources ? 0.5 : 1, pointerEvents: refreshingSources ? 'none' : 'auto' }"
                                 @mouseenter="$event.target.style.color='#fff'; $event.target.style.borderColor='#888'"
@@ -3338,6 +3809,11 @@
                                     style="margin-right: 4px;"></i>
                                 {{ refreshingSources ? '刷新中...' : '刷新线路' }}
                             </span>
+                        </div>
+
+                        <!-- 🔒 未登录预览：锁定线路 -->
+                        <div v-if="previewLocked" class="preview-locked-note">
+                            <i class="fas fa-lock"></i> 登录后解锁全部播放线路
                         </div>
 
                         <!-- 测速类型图例 -->
@@ -3411,7 +3887,7 @@
                         </div>
 
                         <!-- 全部不可用提示 -->
-                        <div v-else-if="!isTestingSources && fastSources.length === 0 && slowSources.length === 0"
+                        <div v-else-if="!isTestingSources && !previewLocked && fastSources.length === 0 && slowSources.length === 0"
                             class="text-center py-4"
                             style="background: rgba(255,0,0,0.1); border-radius: 8px; border: 1px solid rgba(255,0,0,0.2);">
                             <i class="fas fa-exclamation-triangle text-warning" style="font-size: 24px;"></i>
@@ -3424,7 +3900,7 @@
                     <div>
                         <div class="panel-title" style="display: flex; align-items: center;">
                             选集播放
-                            <span @click="refreshEpisodes"
+                            <span v-if="!previewLocked" @click="refreshEpisodes"
                                 style="margin-left: 10px; font-size: 12px; color: #888; cursor: pointer; padding: 2px 8px; border-radius: 4px; border: 1px solid #444; transition: all 0.2s;"
                                 :style="{ opacity: refreshingEpisodes ? 0.5 : 1, pointerEvents: refreshingEpisodes ? 'none' : 'auto' }"
                                 @mouseenter="$event.target.style.color='#fff'; $event.target.style.borderColor='#888'"
@@ -3434,15 +3910,21 @@
                                 {{ refreshingEpisodes ? '刷新中...' : '刷新集数' }}
                             </span>
                         </div>
-                        <div v-if="loadingDetail" class="text-center py-5 text-muted"><i
-                                class="fas fa-spinner fa-spin"></i>
-                            加载中...</div>
-                        <div v-else class="ep-grid">
-                            <div v-for="ep in episodeList" class="ep-btn" :class="{ active: currentUrl === ep.url }"
-                                @click="play(ep.url)">
-                                {{ ep.name }}
-                            </div>
+                        <!-- 🔒 未登录预览：锁定选集 -->
+                        <div v-if="previewLocked" class="preview-locked-note">
+                            <i class="fas fa-lock"></i> 登录后解锁选集播放
                         </div>
+                        <template v-else>
+                            <div v-if="loadingDetail" class="text-center py-5 text-muted"><i
+                                    class="fas fa-spinner fa-spin"></i>
+                                加载中...</div>
+                            <div v-else class="ep-grid">
+                                <div v-for="ep in episodeList" class="ep-btn" :class="{ active: currentUrl === ep.url }"
+                                    @click="play(ep.url)">
+                                    {{ ep.name }}
+                                </div>
+                            </div>
+                        </template>
                     </div>
                 </div>
 
@@ -3494,14 +3976,16 @@
         function showPasswordError(message) {
             const errorDiv = document.getElementById('password-error');
             const errorText = document.getElementById('password-error-text');
-            errorText.textContent = message;
+            errorText.textContent = message;  // 用 textContent 防止服务器返回的错误信息触发 XSS
             errorDiv.style.display = 'flex';
         }
 
         // Hide login screen with animation
         function hideLoginScreen() {
             const screen = document.getElementById('password-screen');
+            if (screen._dismissTimer) { clearTimeout(screen._dismissTimer); screen._dismissTimer = null; }
             screen.classList.add('hidden');
+            screen.classList.remove('deeplink-mode');  // 复位深链半透明模式，避免遗留到后续常规登录
             setTimeout(() => {
                 screen.style.display = 'none';
             }, 500);
@@ -3602,7 +4086,15 @@
 
             } catch (e) {
                 console.error('Auth check error:', e);
-                window.startApp && window.startApp();
+                // 容错：保持原有 fail-open(后端异常时放行)，但深链 + 无缓存登录态这一特定情形除外——
+                // 否则会被 fail-open 触发资源站搜索并绕过登录墙(违背"未登录不加载资源站")。该情形改为渲染锁定预览。
+                let hasPlay = false;
+                try { hasPlay = !!new URLSearchParams(location.search).get('play'); } catch (_) { }
+                if (hasPlay && !localStorage.getItem(AUTH_STORAGE_KEY)) {
+                    showLoginScreen();
+                } else {
+                    window.startApp && window.startApp();
+                }
             }
         }
 
@@ -3618,9 +4110,75 @@
             const screen = document.getElementById('password-screen');
 
             if (loader) loader.classList.add('hidden');
+
+            // 🔗 未登录用户打开分享深链 /?play=剧名：先渲染"锁定播放框架"(标题+TMDB简介+黑屏+登录提示)，
+            //    登录框改半透明浮层(透出背景框架)，且全程不加载任何资源站。否则显示常规不透明登录墙。
+            let playName = '';
+            try { playName = new URLSearchParams(location.search).get('play') || ''; } catch (e) { }
+            if (playName) {
+                renderDeepLinkPreview(playName);
+                screen.classList.add('deeplink-mode');
+            } else {
+                screen.classList.remove('deeplink-mode');
+            }
+
+            screen.classList.remove('hidden');
             screen.style.display = 'flex';
-            setTimeout(() => document.getElementById('password-input').focus(), 100);
+            setTimeout(() => { const el = document.getElementById('password-input'); if (el) el.focus(); }, 100);
         }
+
+        // 🔒 渲染未登录深链"锁定框架"：先用最小信息(仅剧名)立即出框架，再异步用 TMDB(/api/preview) 补全简介/海报。
+        async function renderDeepLinkPreview(name) {
+            let meta = { name: name, title: name, synopsis: '', poster: '' };
+            const apply = () => {
+                if (window.vueApp && typeof window.vueApp.showDeepLinkPreview === 'function') {
+                    window.vueApp.showDeepLinkPreview(meta);
+                    return true;
+                }
+                return false;
+            };
+            // 等 Vue 实例就绪(通常解析期已挂载)，最多重试 ~2s
+            let tries = 0;
+            const tryApply = () => { if (!apply() && tries++ < 40) setTimeout(tryApply, 50); };
+            tryApply();
+            // 异步取 TMDB 简介/海报覆盖更新(失败则保留最小框架)
+            try {
+                const r = await fetch('/api/preview?name=' + encodeURIComponent(name));
+                if (r.ok) {
+                    const d = await r.json();
+                    meta = { name: name, title: d.title || name, synopsis: d.synopsis || '', poster: d.poster || '' };
+                    apply();
+                }
+            } catch (e) { /* 降级：保留仅剧名的框架 */ }
+        }
+
+        // 🔗 唤起半透明登录浮层(深链锁定框架里的"立即登录"按钮调用)
+        window.showLoginForDeepLink = function () {
+            const screen = document.getElementById('password-screen');
+            if (!screen) return;
+            // 取消可能正在进行的关闭动画定时器，避免"刚点开又被旧定时器隐藏"
+            if (screen._dismissTimer) { clearTimeout(screen._dismissTimer); screen._dismissTimer = null; }
+            screen.classList.add('deeplink-mode');
+            screen.classList.remove('hidden');
+            screen.style.display = 'flex';
+            setTimeout(() => { const el = document.getElementById('password-input'); if (el) el.focus(); }, 100);
+        };
+
+        // 🔗 关闭深链登录浮层(回看背景框架；仅隐藏浮层，不改变登录状态)
+        window.dismissDeepLinkLogin = function () {
+            const screen = document.getElementById('password-screen');
+            if (!screen) return;
+            screen.classList.add('hidden');
+            if (screen._dismissTimer) clearTimeout(screen._dismissTimer);
+            screen._dismissTimer = setTimeout(() => {
+                // 若期间又被重新打开(移除了 hidden)，则不隐藏
+                if (screen.classList.contains('hidden')) screen.style.display = 'none';
+                screen._dismissTimer = null;
+            }, 300);
+        };
+
+        // 供 Vue 方法调用
+        window.showLoginScreen = showLoginScreen;
 
         // Run check when DOM is ready
         document.addEventListener('DOMContentLoaded', () => {
@@ -3686,7 +4244,36 @@
         fetchClientPublicIP();
 
         let dp = null;
+        // 🛡️ 安全跳转：媒体在换源/代理回退重载时 currentTime 会是 NaN，相对跳转会把 NaN 写进 currentTime →
+        //    DPlayer 抛 "non-finite" TypeError、可能打断换源。所有跳转统一走守卫，非有限值直接跳过。
+        const safeSeek = (t) => { if (dp && Number.isFinite(t) && t >= 0) { try { dp.seek(t); } catch (e) { } } };
+        const safeSeekBy = (delta) => {
+            if (!dp || !dp.video) return;
+            const cur = dp.video.currentTime;
+            if (!Number.isFinite(cur)) return; // 媒体重载中 currentTime=NaN → 放弃本次相对跳转
+            const dur = Number.isFinite(dp.video.duration) ? dp.video.duration : Infinity;
+            const next = Math.min(dur, Math.max(0, cur + delta));
+            if (Number.isFinite(next)) { try { dp.video.currentTime = next; } catch (e) { } }
+        };
         let _lastProgressSaveTime = 0;  // timeupdate 节流时间戳（每15秒保存一次）
+        // 🧭 导航令牌：每次切换剧集/打开/关闭详情时自增，用于作废上一部剧残留的
+        //    异步任务（refreshEpisodes / refreshSources / 测速探测 / 错误回退定时器），
+        //    防止旧剧的回调把内容灌进新剧的播放器（串剧）。
+        let _navSeq = 0;
+
+        // 🚦 并发池：逐批执行 worker，限制同时进行的请求数。
+        //    用于测速——测"全部"资源站以保留完整可用列表，但同时最多 limit 个，避免一次性几十个请求打满连接。
+        async function runWithConcurrency(items, limit, worker) {
+            let idx = 0;
+            const n = Math.max(1, Math.min(limit, items.length));
+            const runners = Array.from({ length: n }, async () => {
+                while (idx < items.length) {
+                    const i = idx++;
+                    try { await worker(items[i], i); } catch (e) { /* 单项失败不影响其余 */ }
+                }
+            });
+            await Promise.all(runners);
+        }
 
         // 💾 倍速恢复辅助 — 多次重试确保 HLS.js 不会重置
         function ensurePlaybackSpeed(player) {
@@ -3726,6 +4313,12 @@
                     refreshingEpisodes: false,  // 刷新集数中
                     refreshingSources: false,  // 刷新线路中
                     showInfoModal: false,  // 电影详情弹窗
+                    showSharePanel: false,   // 分享面板
+                    shareIncludeTime: false, // 是否带"从当前进度开始"
+                    shareSeconds: 0,         // 当前播放秒数（用于带时间分享）
+                    previewLocked: false,    // 🔒 未登录深链预览态：只渲染框架(标题+简介+黑屏)，不加载任何资源站
+                    deepLinkLoading: false,  // ⏳ 已登录深链：立即显示播放页框架(加载态)，搜索/测速在后台进行，避免先闪搜索结果页
+                    deepLinkSourceCount: 0,  // ⏳ 深链加载帧里展示"已找到 N 个线路"的动态计数
                     infoModalData: null,   // 弹窗数据
                     TMDB_IMG_URL: TMDB_IMG_URL,  // 模板中使用
                     TMDB_BACKDROP_URL: TMDB_BACKDROP_URL,
@@ -3734,10 +4327,12 @@
                     keyword: '', loading: false, searched: false, rawList: [],
                     showDetail: false, currentGroup: null, currentSource: null,
                     episodeList: [], currentUrl: '', loadingDetail: false,
-                    imageMap: {}, fallbackMap: {}, heroList: [], scrollY: 0,
+                    imageMap: {}, fallbackMap: {}, heroList: [],
+                    pastCompactThreshold: false,  // 滚动越过 400px(用于搜索框 compact)；仅阈值翻转时更新，避免每帧重渲染
                     hotList: [],
                     sitesMap: {},  // 缓存站点信息（用于客户端测速）
                     corsProxyUrl: null,  // CORS 代理 URL（用于中转无法直接访问的资源站 API）
+                    danmakuEnabled: false,  // 🗨️ 弹幕开关（来自 /api/config，配置了 DANMU_API_URL 才为 true）
                     playbackErrorCount: 0,  // 播放失败计数
                     isAutoRetrying: false,  // 是否正在自动重试
                     autoRetryMessage: '',  // 自动切换提示信息
@@ -3877,16 +4472,24 @@
                     document.body.classList.add('tv-mode');
                 }
 
-                // 性能优化：使用 passive 滚动监听 + 节流
+                // 性能优化：passive + rAF 节流。
+                // 关键：不再每帧写响应式 scrollY(那会触发整棵巨型模板重渲染→滚动卡顿)。
+                // 导航栏/返回顶部按钮的 class 直接 classList.toggle(零重渲染)；搜索框 compact 只在
+                // "是否越过 400px" 这个阈值翻转时才更新响应式布尔(极少触发)。
                 let scrollTicking = false;
                 window.addEventListener('scroll', () => {
-                    if (!scrollTicking) {
-                        requestAnimationFrame(() => {
-                            this.scrollY = window.scrollY;
-                            scrollTicking = false;
-                        });
-                        scrollTicking = true;
-                    }
+                    if (scrollTicking) return;
+                    scrollTicking = true;
+                    requestAnimationFrame(() => {
+                        const y = window.scrollY || window.pageYOffset || 0;
+                        this._navEl = this._navEl || document.querySelector('.navbar-custom');
+                        this._btnTopEl = this._btnTopEl || document.querySelector('.btn-top');
+                        if (this._navEl) this._navEl.classList.toggle('scrolled', y > 50);
+                        if (this._btnTopEl) this._btnTopEl.classList.toggle('show', y > 500);
+                        const past = y > 400;
+                        if (this.pastCompactThreshold !== past) this.pastCompactThreshold = past;
+                        scrollTicking = false;
+                    });
                 }, { passive: true });
 
                 // 性能优化：resize 事件节流
@@ -3898,8 +4501,9 @@
                     }, 150);
                 }, { passive: true });
 
-                // 修复：点击任意地方关闭 DPlayer 右键菜单
+                // 修复：点击任意地方关闭 DPlayer 右键菜单（仅在播放器打开时才查询 DOM，避免首页/搜索每次点击都跑 querySelector）
                 document.addEventListener('click', (e) => {
+                    if (!this.showDetail) return;
                     const menu = document.querySelector('.dplayer-menu');
                     if (menu && menu.classList.contains('dplayer-menu-show')) {
                         // 如果点击的不是菜单内部，则关闭菜单
@@ -3907,7 +4511,7 @@
                             menu.classList.remove('dplayer-menu-show');
                         }
                     }
-                });
+                }, { passive: true });
 
                 // 📺 TV 遥控器键盘控制 - 使用 window 级别捕获
                 const self = this;
@@ -3996,7 +4600,7 @@
                             if (isProgressBar && dp && dp.video) {
                                 e.preventDefault();
                                 e.stopImmediatePropagation();
-                                dp.video.currentTime = Math.max(0, dp.video.currentTime - 10);
+                                safeSeekBy(-10);
                                 dp.notice('⏪ 快退 10 秒');
                                 return false;
                             }
@@ -4007,7 +4611,7 @@
                             if (isProgressBar && dp && dp.video) {
                                 e.preventDefault();
                                 e.stopImmediatePropagation();
-                                dp.video.currentTime = Math.min(dp.video.duration || 0, dp.video.currentTime + 10);
+                                safeSeekBy(10);
                                 dp.notice('⏩ 快进 10 秒');
                                 return false;
                             }
@@ -4060,6 +4664,17 @@
                 };
             },
             computed: {
+                // 🔗 当前分享链接（响应 shareIncludeTime / 集数变化）
+                shareUrl() {
+                    if (!this.currentGroup || !this.currentGroup.name) return location.origin + '/';
+                    let u = location.origin + '/?play=' + encodeURIComponent(this.currentGroup.name);
+                    const cur = (this.episodeList && this.episodeList.length > 1)
+                        ? this.episodeList.find(e => e.url === this.currentUrl) : null;
+                    if (cur && cur.name) u += '&ep=' + encodeURIComponent(cur.name);
+                    if (this.shareIncludeTime && this.shareSeconds > 0) u += '&t=' + this.shareSeconds;
+                    return u;
+                },
+                canNativeShare() { return typeof navigator !== 'undefined' && !!navigator.share; },
                 groupedList() {
                     const groups = {};
                     this.rawList.forEach(item => {
@@ -4067,7 +4682,8 @@
                         if (!groups[name]) groups[name] = { name: name, pic: item.vod_pic, sources: [] };
                         const isDefault = (url) => !url || url.includes('mac_default') || url.includes('nopic');
                         if (isDefault(groups[name].pic) && !isDefault(item.vod_pic)) groups[name].pic = item.vod_pic;
-                        if (isDefault(groups[name].pic)) this.handleImgError(name);
+                        // 注：图片回退(handleImgError)已在搜索 onmessage 中按新到达的项处理，
+                        //     computed 内不再调用，保持纯函数、避免渲染期副作用引发的重渲染抖动。
 
                         groups[name].sources.push({
                             ...item,
@@ -4121,6 +4737,10 @@
                             this.corsProxyUrl = config.cors_proxy_url;
                             console.log('[Config] CORS 代理已配置:', config.cors_proxy_url);
                         }
+
+                        // 🗨️ 弹幕开关（服务端配置了 DANMU_API_URL 才开启）
+                        this.danmakuEnabled = !!config.danmaku_enabled;
+                        if (this.danmakuEnabled) console.log('[Config] 弹幕已开启');
 
                         // Vercel 兼容性检测
                         if (config.enable_local_image_cache === false) {
@@ -4180,6 +4800,9 @@
 
                     // 5. 加载观看历史
                     this.loadWatchHistory();
+
+                    // 6. 🔗 处理分享深链 ?play=（自动搜索并打开对应剧）
+                    this.handleDeepLink();
                 },
 
                 // ========== 📺 观看历史功能 ==========
@@ -4256,15 +4879,42 @@
 
                 // 保存观看历史到 localStorage（并同步到云端）
                 saveWatchHistoryToStorage() {
+                    const store = (payload) => localStorage.setItem('donggua_watch_history', JSON.stringify(payload));
                     try {
-                        localStorage.setItem('donggua_watch_history', JSON.stringify(this.watchHistory));
-
-                        // 如果启用了同步，推送到服务器
-                        if (this.syncEnabled && this.syncToken) {
-                            this.pushHistoryToServer();
-                        }
+                        store(this.watchHistory);
                     } catch (e) {
-                        console.error('[观看历史] 保存失败:', e);
+                        // 🛡️ 配额超限时分级精简，避免静默丢失最新进度（合并完整线路列表后体积变大）
+                        console.warn('[观看历史] 本地存储超限，精简后重试:', e?.name || e);
+                        try {
+                            // 降级1：仅最近 8 条保留完整线路数据，其余去掉体积大的 vod_play_url/vod_content
+                            const slim = this.watchHistory.map((item, idx) => {
+                                if (idx < 8 || !item.groupData) return item;
+                                return {
+                                    ...item,
+                                    groupData: {
+                                        ...item.groupData,
+                                        sources: item.groupData.sources.map(s => ({
+                                            ...s, vod_play_url: '', vod_content: ''
+                                        }))
+                                    }
+                                };
+                            });
+                            store(slim);
+                            console.log('[观看历史] 已精简旧记录线路数据后保存');
+                        } catch (e2) {
+                            try {
+                                // 降级2：仅保留最近 15 条
+                                store(this.watchHistory.slice(0, 15));
+                                console.log('[观看历史] 已仅保留最近 15 条');
+                            } catch (e3) {
+                                console.error('[观看历史] 保存失败（本地存储已满）:', e3);
+                            }
+                        }
+                    }
+
+                    // 同步始终推送完整数据（服务器无本地配额限制）
+                    if (this.syncEnabled && this.syncToken) {
+                        this.pushHistoryToServer();
                     }
                 },
 
@@ -4286,11 +4936,70 @@
                             if (this.syncEnabled) {
                                 // 启用同步，执行首次同步
                                 await this.syncHistory();
+                                await this.pullUserSettings();  // 同步用户偏好(弹幕开关等)
                             }
                         } catch (e) {
                             console.error('[同步] 检查同步状态失败:', e);
                         }
                     }
+                },
+
+                // 🗨️ 拉取服务器端用户设置(弹幕开关等)，跨设备记住。应用到 DPlayer 的 localStorage 键，
+                //    使之后创建的播放器据此初始化(开/关 + 齿轮里复选框状态)；若已在播则立即应用。
+                async pullUserSettings() {
+                    if (!this.syncEnabled || !this.syncToken) return;
+                    try {
+                        const res = await fetch(`/api/settings/pull?token=${this.syncToken}`);
+                        const data = await res.json();
+                        if (!data || !data.sync_enabled || !data.settings) return;
+                        if (typeof data.settings.danmakuOff === 'boolean') {
+                            try { localStorage.setItem('dplayer-danmaku-show', data.settings.danmakuOff ? '0' : '1'); } catch (e) { }
+                            try { if (dp && dp.danmaku) { data.settings.danmakuOff ? dp.danmaku.hide() : dp.danmaku.show(); } } catch (e) { }
+                            console.log('[同步] 已应用弹幕开关偏好:', data.settings.danmakuOff ? '关' : '开');
+                        }
+                        // 弹幕样式(行数/速度/字号/不透明度/字体)跨设备同步。
+                        // ⚠️ danmakuStyle 管理器在"首次播放、播放器创建后"才存在,而本拉取在页面启动时就跑——
+                        //    管理器还不存在时必须先落到 localStorage(load() 读它),否则服务器值被静默丢弃、其它设备永远是本地旧值。
+                        if (data.settings.dmStyle && typeof data.settings.dmStyle === 'object') {
+                            try {
+                                if (window.danmakuStyle && window.danmakuStyle.setCfg) {
+                                    window.danmakuStyle.setCfg(data.settings.dmStyle);  // 播放器已在 → 立即应用+刷新面板
+                                } else {
+                                    const cur = JSON.parse(localStorage.getItem('donggua_dm_style') || '{}');
+                                    localStorage.setItem('donggua_dm_style', JSON.stringify(Object.assign(cur || {}, data.settings.dmStyle)));
+                                }
+                                console.log('[同步] 已应用弹幕样式偏好:', JSON.stringify(data.settings.dmStyle));
+                            } catch (e) { }
+                        }
+                    } catch (e) { console.error('[同步] 拉取用户设置失败:', e); }
+                },
+
+                // 🗨️ 保存"弹幕开关"偏好：本地(DPlayer 已写)+ 服务器(跨设备)。off=true 表示关弹幕。
+                pushDanmakuPref(off) {
+                    try { localStorage.setItem('dplayer-danmaku-show', off ? '0' : '1'); } catch (e) { }
+                    if (!this.syncEnabled || !this.syncToken) return;
+                    try {
+                        fetch('/api/settings/push', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token: this.syncToken, settings: { danmakuOff: !!off } })
+                        }).catch(() => { });
+                    } catch (e) { }
+                },
+
+                // 🗨️ 保存弹幕样式(行数/速度/字号/不透明度)到服务器(跨设备)。防抖,避免拖滑块时狂发请求。
+                pushDanmakuStyle(cfg) {
+                    if (!this.syncEnabled || !this.syncToken) return;
+                    clearTimeout(this._dmStyleTimer);
+                    this._dmStyleTimer = setTimeout(() => {
+                        try {
+                            fetch('/api/settings/push', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ token: this.syncToken, settings: { dmStyle: cfg } })
+                            }).catch(() => { });
+                        } catch (e) { }
+                    }, 800);
                 },
 
                 // 拉取服务器历史（服务器优先模式）
@@ -4485,6 +5194,22 @@
                     // 查找是否已存在
                     const existingIndex = this.watchHistory.findIndex(item => item.name === name);
 
+                    // 🔧 修复"历史记录资源列表不齐全"：currentGroup 是详情页打开瞬间的快照，
+                    //    流式搜索后续到达的线路不会并入这个被引用的对象。这里用最新的完整
+                    //    groupedList（反映当前完整 rawList）补齐缺失线路，已测速的线路保留其测速数据。
+                    if (groupData && Array.isArray(groupData.sources)) {
+                        const fresh = this.groupedList.find(g => g.name === name);
+                        if (fresh && fresh.sources.length > groupData.sources.length) {
+                            const existKeys = new Set(groupData.sources.map(s => s.site_key));
+                            const merged = groupData.sources.slice();
+                            fresh.sources.forEach(s => {
+                                if (s.site_key && !existKeys.has(s.site_key)) merged.push(s);
+                            });
+                            console.log('[观看历史] 补齐线路:', existKeys.size, '→', merged.length, '条');
+                            groupData = { ...groupData, sources: merged };
+                        }
+                    }
+
                     const historyItem = {
                         name: name,
                         poster: poster || '',
@@ -4500,6 +5225,7 @@
                         groupData: groupData ? {
                             name: groupData.name,
                             pic: groupData.pic,
+                            sourcesTestedAt: groupData.sourcesTestedAt || null,  // 🕐 测速时间戳：历史回放据此决定是否需要重测(新鲜则用本地缓存)
                             sources: groupData.sources.map((s, idx) => ({
                                 vod_id: s.vod_id,  // 用于刷新集数
                                 vod_name: s.vod_name,
@@ -4509,7 +5235,10 @@
                                 site_name: s.site_name,
                                 site_key: s.site_key || (s.site_name + '_' + idx),  // 用于匹配高亮
                                 latency: s.latency || 500,  // 默认延迟
-                                _testType: s._testType || null  // 保存测速类型: direct/proxy/server
+                                _testType: s._testType || null,  // 保存测速类型: direct/proxy/server
+                                // 🔧 保留代理标记，否则只能通过代理访问的线路在历史回放时会被当成直连而播放失败
+                                _useProxy: s._useProxy || false,
+                                _proxyUrl: s._proxyUrl || null
                             }))
                         } : null
                     };
@@ -4620,7 +5349,7 @@
                         box-shadow: 0 10px 40px rgba(0,0,0,0.5);
                         border: 1px solid rgba(229, 9, 20, 0.3);
                     `;
-                    toast.innerHTML = message;
+                    toast.textContent = message;  // textContent 防 XSS
                     document.body.appendChild(toast);
 
                     // 延迟刷新以便用户看到提示
@@ -4685,11 +5414,16 @@
                     if (!item || !item.name) return;
                     console.log('[观看历史] 点击播放:', item.name, 'groupData:', !!item.groupData, 'episode:', item.episode);
 
+                    // 🧭 进入新剧：自增导航令牌，作废上一部剧残留的异步刷新/测速/回退定时器
+                    _navSeq++;
+                    this.refreshingEpisodes = false;
+                    this.isTestingSources = false;
+
                     // 🛡️ 切换不同剧集时，销毁旧播放器，防止 Hls.js 残留旧流
                     const isSwitchingShow = this.currentGroup?.name && this.currentGroup.name !== item.name;
                     if (isSwitchingShow && dp) {
                         console.log('[观看历史] 切换到不同剧集，销毁旧播放器实例');
-                        try { dp.destroy(); } catch(e) { console.warn('[观看历史] 销毁播放器异常:', e); }
+                        try { dp.destroy(); } catch (e) { console.warn('[观看历史] 销毁播放器异常:', e); }
                         dp = null;
                     }
 
@@ -4777,6 +5511,16 @@
                                     this.play(targetEpisode.url, bestSource.site_name);
                                     // 后台自动刷新集数（不阻塞播放）
                                     this.refreshEpisodes();
+                                    // 🔄 线路测速优先用本地缓存(历史已存每路 latency/_testType)。仅当"从未测速(缺失)"或"缓存超过 24h"
+                                    //    才后台重测一次——避免每次打开历史都重测全部线路。重测结果会随播放进度存回历史，下次即用缓存。
+                                    const _testedAt = item.groupData.sourcesTestedAt || 0;
+                                    const _cacheAgeH = (Date.now() - _testedAt) / 3600000;
+                                    if (!_testedAt || _cacheAgeH > 24) {
+                                        console.log('[观看历史] 线路测速缓存' + (_testedAt ? '过期(' + _cacheAgeH.toFixed(1) + 'h)' : '缺失') + '，后台重测一次');
+                                        this.refreshSources();
+                                    } else {
+                                        console.log('[观看历史] 用本地测速缓存(' + _cacheAgeH.toFixed(1) + 'h 前)，跳过重测');
+                                    }
                                     return;
                                 }
                             }
@@ -4825,22 +5569,26 @@
                         const clientWidth = row.clientWidth;
                         const maxScroll = scrollWidth - clientWidth;
 
-                        // 左按钮：只有滚动过才显示
-                        this.historyCanScrollLeft = scrollLeft > 10;
-                        // 右按钮：只有当右侧还有未显示内容时显示
-                        this.historyCanScrollRight = maxScroll > 10 && scrollLeft < maxScroll - 10;
-
-                        console.log('[历史按钮状态] scrollLeft=', scrollLeft, 'maxScroll=', maxScroll,
-                            'canLeft=', this.historyCanScrollLeft, 'canRight=', this.historyCanScrollRight);
+                        // 左按钮：只有滚动过才显示；右按钮：只有当右侧还有未显示内容时显示
+                        // 仅在值变化时赋值，避免无谓触发整树重渲染
+                        const showLeft = scrollLeft > 10;
+                        const showRight = maxScroll > 10 && scrollLeft < maxScroll - 10;
+                        if (this.historyCanScrollLeft !== showLeft) this.historyCanScrollLeft = showLeft;
+                        if (this.historyCanScrollRight !== showRight) this.historyCanScrollRight = showRight;
                     } else {
-                        this.historyCanScrollLeft = false;
-                        this.historyCanScrollRight = false;
+                        if (this.historyCanScrollLeft) this.historyCanScrollLeft = false;
+                        if (this.historyCanScrollRight) this.historyCanScrollRight = false;
                     }
                 },
 
-                // 监听观看历史滚动事件
+                // 监听观看历史滚动事件（rAF 节流：每帧最多一次 reflow 读取 + 状态更新，避免每个滚动事件都强制重排）
                 onHistoryScroll() {
-                    this.updateHistoryScrollNeeded();
+                    if (this._histScrollTicking) return;
+                    this._histScrollTicking = true;
+                    requestAnimationFrame(() => {
+                        this.updateHistoryScrollNeeded();
+                        this._histScrollTicking = false;
+                    });
                 },
 
                 // 监听分类榜单滚动事件 (带节流优化)
@@ -5132,38 +5880,234 @@
 
                 getLatencyClass(ms) { return ms < 500 ? 'dot-green' : (ms < 2000 ? 'dot-yellow' : 'dot-red'); },
                 // 投屏功能：纯粹的原生实现
+                // 🔗 打开分享面板（可勾选"从当前进度开始"）
+                openSharePanel() {
+                    if (!this.currentGroup || !this.currentGroup.name) return;
+                    this.shareIncludeTime = false;
+                    this.shareSeconds = (typeof dp !== 'undefined' && dp && dp.video) ? Math.floor(dp.video.currentTime || 0) : 0;
+                    this.showSharePanel = true;
+                },
+                // 执行分享：移动端调系统分享面板，桌面端复制链接
+                // 纯复制分享链接到剪贴板（返回是否成功；不弹任何 UI）
+                async copyShareLink() {
+                    const url = this.shareUrl;
+                    try { await navigator.clipboard.writeText(url); return true; } catch (e) { }
+                    try {
+                        const ta = document.createElement('textarea');
+                        ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                        document.body.appendChild(ta); ta.select();
+                        const ok = document.execCommand('copy'); document.body.removeChild(ta);
+                        return ok;
+                    } catch (e) { return false; }
+                },
+                // 「复制」按钮：只复制链接，不调系统分享（系统分享由「更多 App」按钮负责）
+                async confirmShare() {
+                    const ok = await this.copyShareLink();
+                    if (ok) this.showMiniToast('🔗 链接已复制');
+                    else window.prompt('复制此链接分享：', this.shareUrl);
+                },
+                // 秒数格式化 mm:ss
+                formatSeconds(s) {
+                    s = Math.floor(s || 0);
+                    const m = Math.floor(s / 60), sec = s % 60;
+                    return m + ':' + String(sec).padStart(2, '0');
+                },
+                // 🔗 分享到指定社交平台
+                shareTo(platform) {
+                    const url = this.shareUrl;
+                    const name = (this.currentGroup && this.currentGroup.name) || '';
+                    const text = `一起看《${name}》`;
+                    const u = encodeURIComponent(url), t = encodeURIComponent(text), tu = encodeURIComponent(text + ' ' + url);
+                    const openWin = (href) => window.open(href, '_blank', 'noopener,noreferrer,width=640,height=620');
+                    switch (platform) {
+                        case 'native':
+                            // 调起系统分享面板（可分享到列表外的任意 App）；桌面端无此能力则复制链接
+                            if (navigator.share) { navigator.share({ title: name + ' - E视界', text, url }).catch(() => { }); return; }
+                            this.copyShareLink().then(() => this.showMiniToast('🔗 链接已复制，可粘贴到任意 App 分享')); return;
+                        case 'wechat':
+                            // 微信没有网页直接分享接口（只能微信内 JS-SDK 或扫码/粘贴）：
+                            // 移动端走系统分享面板（可选微信）；桌面端复制链接并提示去微信粘贴（不依赖国外二维码服务）
+                            if (navigator.share) { navigator.share({ title: name, text, url }).catch(() => { }); return; }
+                            this.copyShareLink().then(() => this.showMiniToast('🔗 链接已复制，打开微信粘贴给好友/群即可分享')); return;
+                        case 'instagram':
+                            // IG 不支持网页带链接分享：移动端系统分享，否则复制
+                            if (navigator.share) { navigator.share({ title: name, text, url }).catch(() => { }); return; }
+                            this.copyShareLink().then(() => this.showMiniToast('Instagram 不支持直接分享链接，已复制，去 App 粘贴')); return;
+                        case 'qq': {
+                            // QQ 互联官方分享（发送给 QQ 好友/群）
+                            const s = encodeURIComponent(`来 E视界 一起看《${name}》`);
+                            openWin(`https://connect.qq.com/widget/shareqq/index.html?url=${u}&title=${t}&summary=${s}&desc=${s}&source=E视界`);
+                            return;
+                        }
+                        case 'telegram': openWin(`https://t.me/share/url?url=${u}&text=${t}`); return;
+                        case 'whatsapp': openWin(`https://api.whatsapp.com/send?text=${tu}`); return;
+                        case 'facebook': openWin(`https://www.facebook.com/sharer/sharer.php?u=${u}`); return;
+                        case 'x': openWin(`https://twitter.com/intent/tweet?url=${u}&text=${t}`); return;
+                    }
+                },
+                // 把当前剧/集写进地址栏（便于收藏/分享），用 replaceState 不污染历史
+                syncShareUrl() {
+                    try {
+                        if (!this.currentGroup || !this.currentGroup.name) return;
+                        let u = '/?play=' + encodeURIComponent(this.currentGroup.name);
+                        const cur = (this.episodeList && this.episodeList.length > 1)
+                            ? this.episodeList.find(e => e.url === this.currentUrl) : null;
+                        if (cur && cur.name) u += '&ep=' + encodeURIComponent(cur.name);
+                        history.replaceState(history.state, '', u);
+                    } catch (e) { }
+                },
+                // 轻量 toast（复制成功等提示）
+                showMiniToast(msg) {
+                    try {
+                        const t = document.createElement('div');
+                        t.textContent = msg;
+                        t.style.cssText = 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);background:rgba(0,0,0,0.88);color:#fff;padding:12px 22px;border-radius:24px;z-index:2147483600;font-size:14px;box-shadow:0 6px 24px rgba(0,0,0,.4);border:1px solid rgba(229,9,20,.4);';
+                        document.body.appendChild(t);
+                        setTimeout(() => { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 1800);
+                    } catch (e) { }
+                },
+                // 🔗 解析 ?play= 深链：自动搜索并在结果就绪后打开对应剧
+                handleDeepLink() {
+                    try {
+                        const p = new URLSearchParams(location.search);
+                        const playName = p.get('play');
+                        if (!playName) return;
+                        this._deepLink = { name: playName, ep: p.get('ep') || '', t: parseInt(p.get('t'), 10) || 0, done: false };
+                        this._deepLinkTargetEp = '';  // 每次深链重置目标集数(真正定位在 tryOpenDeepLink→switchSource 完成)
+                        console.log('[深链] ?play=', playName, 'ep=', this._deepLink.ep, 't=', this._deepLink.t);
+                        // ⏳ 已登录深链：立刻显示"播放页框架(加载态)"盖住后台搜索结果页，避免"先卡在搜索页很久才打开播放页"。
+                        //    搜索"全部完成"后再 openDetail(拿完整源列表选可直连播放的最快线路)；加载帧覆盖等待期；openDetail 会清掉 deepLinkLoading。
+                        this.previewLocked = false;
+                        this.deepLinkLoading = true;
+                        const prevPic = (this.currentGroup && this.currentGroup.pic) || '';
+                        this.currentGroup = { name: playName, pic: prevPic, sources: [] };
+                        this.currentSource = null;
+                        this.episodeList = [];
+                        this.currentUrl = '';
+                        this.isTestingSources = true;  // 抑制"所有采集站均不可用"提示，显示加载/测速态
+                        this.deepLinkSourceCount = 0;  // 加载帧里展示"已找到 N 个线路"
+                        this.showDetail = true;
+                        document.body.classList.add('detail-open');
+                        this.autoSearch(playName);
+                        // 安全兜底：万一 done/onerror/防抖 都没触发(极少)，12s 后用已到的源打开，避免一直卡加载
+                        if (this._dlGraceTimer) clearTimeout(this._dlGraceTimer);
+                        this._dlGraceTimer = setTimeout(() => this.tryOpenDeepLink(false), 12000);
+                    } catch (e) { }
+                },
+                // 深链定位打开。不必等"全部站点搜完(done)"——那要等最慢的几个站点；改为"源流式到达停顿(防抖~1.2s)
+                // 即认为本批已基本到齐"就打开(此时通常已含可播的源)，openDetail 再边测边选。配合 checkEarlyReturn
+                // 一拿到首个可播(direct/proxy)源就立刻起播，不必等全部测速完成。
+                //   onmessage 防抖：源停顿 1.2s → tryOpenDeepLink(false)；done/onerror → tryOpenDeepLink(true)；12s 安全兜底。
+                //   isFinal=false：有匹配就开、还没搜到则继续等；isFinal=true：有匹配就开、确实没有才判失败退出。
+                _clearDeepLinkTimers() {
+                    if (this._dlGraceTimer) { clearTimeout(this._dlGraceTimer); this._dlGraceTimer = null; }
+                    if (this._dlDebounce) { clearTimeout(this._dlDebounce); this._dlDebounce = null; }
+                },
+                tryOpenDeepLink(isFinal) {
+                    const dl = this._deepLink;
+                    if (!dl || dl.done) return;
+                    const norm = (s) => (s || '').trim();
+                    const group = this.groupedList.find(g => norm(g.name) === norm(dl.name))
+                        || this.groupedList.find(g => norm(g.name).includes(norm(dl.name)));
+                    if (!group) {
+                        if (!isFinal) return;  // 还没搜到该剧：继续等(防抖/兜底)，别误判失败
+                        // 搜索结束仍无匹配：退出加载/锁定态，落到已加载的首页/搜索结果，而不是卡在黑屏框架
+                        dl.done = true;
+                        this._clearDeepLinkTimers();
+                        this.previewLocked = false;
+                        this.deepLinkLoading = false;
+                        this.showDetail = false;
+                        document.body.classList.remove('detail-open');
+                        return;
+                    }
+                    dl.done = true;
+                    this._clearDeepLinkTimers();
+                    // 把目标集数交给 openDetail→switchSource→parseEpisodes 在"首次播放"时直接定位(标准化匹配 第01集↔第16集)，
+                    // 不再用事后 setTimeout 轮询切集(那会与自动起播争用、并导致回到第一集)。
+                    this._deepLinkTargetEp = dl.ep || '';
+                    this.openDetail(group);
+                    // 🔗 定位到分享的时间点（等播放器就绪后 seek，覆盖进度恢复）
+                    if (dl.t > 0) {
+                        let st = 0;
+                        const seekTick = () => {
+                            st++;
+                            if (typeof dp !== 'undefined' && dp && dp.video && dp.video.readyState >= 1 && dp.video.duration) {
+                                try { dp.seek(dl.t); dp.notice && dp.notice('▶ 已跳转到分享的时间点'); } catch (e) { }
+                                return;
+                            }
+                            if (st < 40) setTimeout(seekTick, 300);
+                        };
+                        setTimeout(seekTick, 1200);
+                    }
+                },
+                // 🔒 未登录用户打开分享深链：只渲染播放页"锁定框架"(标题+简介+黑屏播放器+登录提示)，
+                //    不发起任何资源站请求(搜索/detail/测速/m3u8)。简介与海报来自 TMDB(/api/preview)。
+                //    登录成功后由 handleDeepLink→openDetail 接管真实播放，openDetail 会清掉 previewLocked。
+                showDeepLinkPreview(meta) {
+                    meta = meta || {};
+                    this.previewLocked = true;
+                    this.isTestingSources = false;
+                    this.refreshingEpisodes = false;
+                    this.refreshingSources = false;
+                    this.loadingDetail = false;
+                    this.episodeList = [];
+                    this.currentUrl = '';
+                    this.currentGroup = { name: meta.name || meta.title || '', pic: meta.poster || '', sources: [] };
+                    this.currentSource = { site_name: '', vod_content: meta.synopsis || '' };
+                    this.showDetail = true;
+                    document.body.classList.add('detail-open');
+                },
+                // 🔒 锁定框架内"立即登录"：唤起半透明登录浮层(透出背景框架)
+                promptLogin() {
+                    if (typeof window.showLoginForDeepLink === 'function') window.showLoginForDeepLink();
+                    else if (typeof window.showLoginScreen === 'function') window.showLoginScreen();
+                },
                 castVideo() {
-                    const videoEl = document.querySelector('.dplayer-video');
+                    const videoEl = (typeof dp !== 'undefined' && dp && dp.video) || document.querySelector('.dplayer-video');
                     if (!videoEl) return alert('请先播放视频');
 
-                    // 🔆 投屏时保持屏幕常亮（重要：防止锁屏导致投屏暂停）
+                    // 🔆 投屏时保持屏幕常亮（防止锁屏导致投屏暂停）
                     this.requestWakeLock();
+                    // 允许 AirPlay / 远程播放（关键：不设此属性 iOS 可能找不到 AirPlay 设备）
+                    try { videoEl.setAttribute('x-webkit-airplay', 'allow'); videoEl.removeAttribute('disableRemotePlayback'); } catch (e) { }
 
-                    // 1. 优先尝试 Remote Playback API (Android Chrome / Edge)
-                    // 关键修复：不再判断 state !== 'disconnected'，只要 API 存在就尝试调用
+                    const ua = navigator.userAgent || '';
+                    const isiOS = /iPhone|iPad|iPod/.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
+                    const isSafari = /Safari/.test(ua) && !/Chrome|CriOS|Edg|EdgA|Android|Firefox|FxiOS|OPR|SamsungBrowser/i.test(ua);
+
+                    // 1) 苹果设备 / Safari → 优先 AirPlay（iOS/iPadOS/macOS Safari）
+                    if (videoEl.webkitShowPlaybackTargetPicker && (isiOS || isSafari)) {
+                        try { videoEl.webkitShowPlaybackTargetPicker(); return; }
+                        catch (e) { console.log('[投屏] AirPlay 调用失败:', e); }
+                    }
+
+                    // 2) Chrome / Android / Edge → Remote Playback API（Cast / DLNA / 无线投屏）
                     if (videoEl.remote && typeof videoEl.remote.prompt === 'function') {
                         videoEl.remote.prompt()
-                            .then(() => console.log('[投屏] 呼出投屏菜单成功'))
+                            .then(() => console.log('[投屏] 已呼出投屏菜单'))
                             .catch((err) => {
-                                // 错误处理：
-                                console.log('[投屏] 无法显示投屏菜单:', err);
-                                alert('未找到投屏设备。\n\n请先在手机下拉通知栏 → 点击「投屏/Cast」→ 搜索并连接您的电视，连接成功后再点击一键投屏即可。');
+                                console.log('[投屏] 无设备/已取消:', err && err.name);
+                                // 兜底再试 AirPlay（部分桌面浏览器也支持）
+                                if (videoEl.webkitShowPlaybackTargetPicker) { try { videoEl.webkitShowPlaybackTargetPicker(); return; } catch (e) { } }
+                                if (err && err.name !== 'NotAllowedError') this._castFallback(videoEl);
                             });
                         return;
                     }
 
-                    // 2. 尝试 Safari AirPlay (iOS)
-                    if (videoEl.webkitShowPlaybackTargetPicker) {
-                        videoEl.webkitShowPlaybackTargetPicker();
-                        return;
-                    }
+                    // 3) 非苹果但有 AirPlay API
+                    if (videoEl.webkitShowPlaybackTargetPicker) { try { videoEl.webkitShowPlaybackTargetPicker(); return; } catch (e) { } }
 
-                    // 3. 真·不支持时的回退：仅复制地址
-                    const videoUrl = this.currentUrl || videoEl.src;
-                    if (confirm('您的浏览器不支持直接投屏。\n\n点击确定复制视频地址，可去其他播放器投屏。')) {
-                        navigator.clipboard.writeText(videoUrl)
-                            .then(() => alert('✅ 地址已复制'))
-                            .catch(() => prompt('请手动复制:', videoUrl));
+                    // 4) 都不支持 → 复制直链并指引
+                    this._castFallback(videoEl);
+                },
+                // 投屏兜底：清晰指引 + 复制视频直链
+                _castFallback(videoEl) {
+                    const url = this.currentUrl || (videoEl && videoEl.src) || '';
+                    const tip = '未找到投屏设备，请确认：\n\n① 电视/盒子与手机连同一个 WiFi\n② 安卓：先从手机下拉通知栏开「投屏 / Cast / 无线投屏」搜索并连接电视，再点本按钮\n③ iPhone：从右上角控制中心点「屏幕镜像」连接 AirPlay 设备\n\n点「确定」复制视频直链，可在电视端浏览器/播放器打开。';
+                    if (confirm(tip)) {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(url).then(() => this.showMiniToast('✅ 视频地址已复制')).catch(() => window.prompt('请手动复制视频地址：', url));
+                        } else { window.prompt('请手动复制视频地址：', url); }
                     }
                 },
 
@@ -5554,6 +6498,16 @@
                                 newItems.forEach(item => {
                                     if (!item.vod_pic || item.vod_pic.includes('mac_default')) this.handleImgError(item.vod_name);
                                 });
+                                // ⏳ 深链加载帧：实时更新"已找到 N 个线路"，并用防抖在"源到达停顿~1.2s"时即打开
+                                //   (不必等最慢站点的 done)，由 openDetail 边测边选、首个可播源就起播。
+                                if (this._deepLink && !this._deepLink.done) {
+                                    const norm = (s) => (s || '').trim();
+                                    const g = this.groupedList.find(x => norm(x.name) === norm(this._deepLink.name))
+                                        || this.groupedList.find(x => norm(x.name).includes(norm(this._deepLink.name)));
+                                    this.deepLinkSourceCount = (g && g.sources) ? g.sources.length : 0;
+                                    if (this._dlDebounce) clearTimeout(this._dlDebounce);
+                                    this._dlDebounce = setTimeout(() => this.tryOpenDeepLink(false), 1200);
+                                }
                             }
                         } catch (err) { }
                     };
@@ -5564,6 +6518,8 @@
                             this._evtSource.close();
                             this._evtSource = null;
                         }
+                        // 🔗 深链：搜索结束，定位打开(若防抖未先触发)；无匹配则判失败退出加载态
+                        this.$nextTick(() => this.tryOpenDeepLink(true));
                     });
 
                     this._evtSource.onerror = () => {
@@ -5572,14 +6528,23 @@
                             this._evtSource.close();
                             this._evtSource = null;
                         }
+                        // 🔗 深链：搜索连接中断也用已到的源尝试打开，避免一直卡在加载帧
+                        if (this._deepLink && !this._deepLink.done) this.$nextTick(() => this.tryOpenDeepLink(true));
                     };
                 },
                 async openDetail(group) {
+                    // 🧭 进入新剧详情：自增导航令牌并记录，用于作废本次测速期间被切换走的残留回调
+                    _navSeq++;
+                    const _openSeq = _navSeq;
+                    this.previewLocked = false;  // 🔒 真实流程接管，解除未登录预览锁定态
+                    this.deepLinkLoading = false;  // ⏳ 真实详情接管，解除深链加载态
+                    this.refreshingEpisodes = false;
                     this.currentGroup = group;
                     this.showDetail = true;
                     document.body.classList.add('detail-open');
                     this.isTestingSources = true;  // 开始测速
                     this.currentSource = null;  // 确保清空之前的选择
+                    this.currentUrl = '';        // 清空旧剧 URL，防止残留 refresh 误匹配
                     this.episodeList = [];
 
                     // 真实用户端测速：获取每个线路的视频URL，直接从用户端测试m3u8延迟
@@ -5593,6 +6558,7 @@
 
                     // 检查是否可以提前返回 - 优先用户端测速结果
                     const checkEarlyReturn = () => {
+                        if (_openSeq !== _navSeq) return;  // 🧭 已切换到别的剧，停止自动选源
                         if (hasAutoSelected) return;
 
                         // 优先检查用户端测速(direct)的快速线路
@@ -5605,11 +6571,25 @@
                             directFastSources.sort((a, b) => a.latency - b.latency);
                             console.log(`[快速返回] 已找到 ${directFastSources.length} 个用户端快速线路，自动选择: ${directFastSources[0].site_name} (${directFastSources[0].latency}ms 🎬)`);
                             this.switchSource(directFastSources[0]);
+                            return;
+                        }
+
+                        // 没有直连快速线路时：一旦确认有"代理可播(proxy)"的源(海外用户多为此类)，立刻起播，
+                        // 不必等 3s 超时或全部测速完成——这就是"首个可播源就直接播"的关键。
+                        const proxyReady = this.currentGroup.sources.filter(s =>
+                            s._testType === 'proxy' && typeof s.latency === 'number' && s.latency < 9000
+                        );
+                        if (proxyReady.length > 0) {
+                            hasAutoSelected = true;
+                            proxyReady.sort((a, b) => a.latency - b.latency);
+                            console.log(`[快速返回] 首个代理可播线路就绪，自动选择: ${proxyReady[0].site_name} (${proxyReady[0].latency}ms 🔁)`);
+                            this.switchSource(proxyReady[0]);
                         }
                     };
 
                     // 超时自动选择（优先用户端测速，其次服务器端）
                     const earlyReturnTimer = setTimeout(() => {
+                        if (_openSeq !== _navSeq) return;  // 🧭 已切换到别的剧，放弃超时自动选源
                         if (hasAutoSelected) return;
                         hasAutoSelected = true;
 
@@ -5625,7 +6605,19 @@
                             return;
                         }
 
-                        // 没有用户端测速结果，回退到服务器端
+                        // 没有直连：优先"代理可播(proxy)"的源——CF Worker 能拉到、用户端能播；
+                        // 'server' 只是服务器测速通、用户端常播不了(代理 403)，放最后兜底。
+                        let proxySources = this.currentGroup.sources.filter(s =>
+                            s._testType === 'proxy' && typeof s.latency === 'number' && s.latency < 9000
+                        );
+                        if (proxySources.length > 0) {
+                            proxySources.sort((a, b) => a.latency - b.latency);
+                            console.log(`[超时返回] 选择代理可播最快的: ${proxySources[0].site_name} (${proxySources[0].latency}ms 🔁)`);
+                            this.switchSource(proxySources[0]);
+                            return;
+                        }
+
+                        // 最后回退到服务器端测速(可能播不了，靠自动换源兜底)
                         const testedSources = this.currentGroup.sources.filter(s =>
                             typeof s.latency === 'number' && s.latency < 9000
                         );
@@ -5637,7 +6629,7 @@
                         }
                     }, MAX_WAIT_TIME);
 
-                    const latencyPromises = this.currentGroup.sources.map(async (source) => {
+                    const latencyWorker = async (source) => {
                         source.latency = '...';
                         source._useProxy = false;  // 默认不使用代理
                         try {
@@ -5805,12 +6797,19 @@
                             }
                         }
                         return source;
-                    });
+                    };
 
-                    // 等待所有测速完成（后台继续）
-                    await Promise.all(latencyPromises);
+                    // 🚦 限并发逐批测速：测「全部」资源站以保留完整可用列表，但同时最多 6 个请求；
+                    //    最先测出的快速源由 checkEarlyReturn / 超时定时器提前选中起播，无需等全部完成
+                    // 🔧 关键：测速前先把所有线路标记为"测速中"(latency='...')，否则并发池里尚未轮到的线路
+                    //    会保留初始的 999ms 而被显示出来（懒加载：未测速的不显示，测出结果后再出现）
+                    this.currentGroup.sources.forEach(s => { s.latency = '...'; });
+                    await runWithConcurrency(this.currentGroup.sources, 6, latencyWorker);
                     clearTimeout(earlyReturnTimer);
+                    // 🧭 测速期间用户可能已切换到别的剧（此时 isTestingSources 归 B 所有），丢弃本次结果
+                    if (_openSeq !== _navSeq) return;
                     this.isTestingSources = false;  // 测速完成
+                    this.currentGroup.sourcesTestedAt = Date.now();  // 🕐 记录测速时间：历史回放据此判断缓存是否新鲜，避免每次都重测
 
                     // 按延迟排序 (低到高)
                     this.currentGroup.sources.sort((a, b) => {
@@ -5837,13 +6836,22 @@
                             console.log(`[测速完成] 选择用户端测速最快的线路: ${directSources[0].site_name} (${directSources[0].latency}ms)`);
                             this.switchSource(directSources[0]);
                         } else {
-                            // 回退到服务器端测速最快的
-                            const fastestAvailable = this.currentGroup.sources.find(s =>
-                                typeof s.latency === 'number' && s.latency < 9000
+                            // 没有直连：优先"代理可播(proxy)"的源(CF Worker 能拉到、用户端能播)；'server' 放最后兜底
+                            const proxySources = this.currentGroup.sources.filter(s =>
+                                s._testType === 'proxy' && typeof s.latency === 'number' && s.latency < 9000
                             );
-                            if (fastestAvailable) {
-                                console.log(`[测速完成] 选择服务器测速最快的线路: ${fastestAvailable.site_name} (${fastestAvailable.latency}ms)`);
-                                this.switchSource(fastestAvailable);
+                            if (proxySources.length > 0) {
+                                console.log(`[测速完成] 选择代理可播最快的线路: ${proxySources[0].site_name} (${proxySources[0].latency}ms)`);
+                                this.switchSource(proxySources[0]);
+                            } else {
+                                // 回退到服务器端测速最快的(可能播不了，靠自动换源兜底)
+                                const fastestAvailable = this.currentGroup.sources.find(s =>
+                                    typeof s.latency === 'number' && s.latency < 9000
+                                );
+                                if (fastestAvailable) {
+                                    console.log(`[测速完成] 选择服务器测速最快的线路: ${fastestAvailable.site_name} (${fastestAvailable.latency}ms)`);
+                                    this.switchSource(fastestAvailable);
+                                }
                             }
                         }
                     }
@@ -5851,8 +6859,22 @@
                 },
                 closeDetail() {
                     this.showDetail = false;
+                    this.previewLocked = false;  // 🔒 退出预览锁定态
+                    this.deepLinkLoading = false;  // ⏳ 退出深链加载态
+                    this._deepLinkTargetEp = '';  // 清除未消费的深链目标集数，避免串到下一部剧
+                    this._lastDanmakuId = null;   // 🗨️ 复位弹幕标识，下次打开重新加载弹幕
+                    this._clearDeepLinkTimers();
                     document.body.classList.remove('detail-open');
                     if (dp) dp.pause();
+
+                    // 🧭 关闭详情：自增导航令牌，作废上一部剧残留的刷新/测速/回退定时器，
+                    //    防止下次打开别的剧时被旧剧的异步回调串剧
+                    _navSeq++;
+                    this.refreshingEpisodes = false;
+                    this.isTestingSources = false;
+
+                    // 🔗 清理地址栏深链参数（回到首页 URL）
+                    try { history.replaceState(history.state, '', location.pathname); } catch (e) { }
 
                     // 释放屏幕常亮
                     this.releaseWakeLock();
@@ -5882,10 +6904,16 @@
                 async switchSource(source) {
                     this.currentSource = source;
                     this.loadingDetail = true;
+                    this.playbackErrorCount = 0;  // 🔄 每次换源重置错误计数：否则换源链(handlePlaybackError>1 即拦截)会在第二个源就卡死
+                    const mySeq = _navSeq;  // 🧭 记录导航上下文（未缓存的源需 await 详情，期间可能切换剧集）
 
                     // 记住当前集数名称，切换后尝试保留（在清空之前获取！）
                     const previousEpName = this.episodeList?.find(ep => ep.url === this.currentUrl)?.name;
                     console.log('[切换资源] 当前集数:', previousEpName);
+
+                    // 🔗 深链首播：优先定位到分享指定的集数(标准化匹配)；用过即清，之后切源回到"保留当前集"的常规逻辑
+                    const epName = this._deepLinkTargetEp || previousEpName;
+                    this._deepLinkTargetEp = '';
 
                     this.episodeList = [];
 
@@ -5894,7 +6922,7 @@
                         // 如果 source 已经有 vod_play_url（来自历史记录），直接使用
                         if (source.vod_play_url) {
                             console.log('[切换资源] 使用已有的 vod_play_url');
-                            this.parseEpisodes(source.vod_play_url, previousEpName);
+                            this.parseEpisodes(source.vod_play_url, epName);
                             this.loadingDetail = false;
                             return;
                         }
@@ -5911,12 +6939,28 @@
                             }
                         }
 
+                        // 🧭 await 期间用户可能已切换剧集：丢弃过期结果，防止把旧剧灌进当前播放器（串剧）
+                        if (mySeq !== _navSeq) {
+                            console.warn('[切换资源] 上下文已切换，丢弃本次结果');
+                            this.loadingDetail = false;
+                            return;
+                        }
+
                         if (detail) {
                             // 保存简介信息到当前源
                             this.currentSource.vod_content = detail.vod_content || detail.vod_blurb || '';
-                            this.parseEpisodes(detail.vod_play_url, previousEpName);
+                            this.parseEpisodes(detail.vod_play_url, epName);
+                        } else {
+                            // 📡 详情拉取为空 → 推进到下一个源，避免换源链在此源卡死(此路径不会走到 play() 重置计数)
+                            this.loadingDetail = false;
+                            this.handlePlaybackError();
+                            return;
                         }
-                    } catch (e) { console.log('[切换资源] 错误:', e); }
+                    } catch (e) {
+                        console.log('[切换资源] 错误:', e);
+                        // 仅在仍是当前导航上下文时推进，避免影响已切走的剧(防串剧)
+                        if (mySeq === _navSeq) { this.loadingDetail = false; this.handlePlaybackError(); return; }
+                    }
                     this.loadingDetail = false;
                 },
 
@@ -5924,6 +6968,10 @@
                 async refreshEpisodes() {
                     if (!this.currentSource || this.refreshingEpisodes) return;
                     this.refreshingEpisodes = true;
+                    // 🧭 记录发起时的导航上下文，await 完成后若用户已切换剧集/资源站则丢弃结果
+                    const mySeq = _navSeq;
+                    const reqSource = this.currentSource;
+                    const reqGroup = this.currentGroup;
                     try {
                         const source = this.currentSource;
                         let vodId = source.vod_id;
@@ -5952,13 +7000,17 @@
 
                         if (!vodId) {
                             console.warn('[刷新集数] 无法获取 vod_id，跳过刷新');
-                            this.refreshingEpisodes = false;
                             return;
                         }
 
                         // 带 nocache 参数，通知服务器跳过缓存
                         const res = await fetch(`/api/detail?site_key=${source.site_key}&id=${vodId}&nocache=1`);
                         const data = await res.json();
+                        // 🧭 await 期间用户可能已切换剧集/资源站：丢弃过期结果，避免串剧与集数列表被旧剧覆盖
+                        if (mySeq !== _navSeq || this.currentSource !== reqSource || this.currentGroup !== reqGroup) {
+                            console.warn('[刷新集数] 上下文已切换，丢弃本次刷新结果（防串剧）');
+                            return;
+                        }
                         if (data.list && data.list.length > 0) {
                             const detail = data.list[0];
                             const oldCount = this.episodeList.length;
@@ -6005,8 +7057,9 @@
                         }
                     } catch (e) {
                         console.error('[刷新集数] 失败:', e);
+                    } finally {
+                        this.refreshingEpisodes = false;
                     }
-                    this.refreshingEpisodes = false;
                 },
 
                 // 🔄 强制刷新线路列表（重新测速）
@@ -6015,6 +7068,9 @@
                     this.refreshingSources = true;
                     this.isTestingSources = true;
                     console.log('[刷新线路] 开始完整重新搜索...');
+                    // 🧭 记录发起时的导航上下文
+                    const mySeq = _navSeq;
+                    const reqGroup = this.currentGroup;
 
                     try {
                         const searchName = this.currentGroup.name;
@@ -6030,6 +7086,12 @@
                         // 完整重新搜索
                         const res = await fetch(`/api/search?wd=${encodeURIComponent(searchName)}&nocache=1`);
                         const data = await res.json();
+
+                        // 🧭 await 期间用户可能已切换剧集：丢弃过期结果，避免覆盖新剧的线路列表（防串剧）
+                        if (mySeq !== _navSeq || this.currentGroup !== reqGroup) {
+                            console.warn('[刷新线路] 上下文已切换，丢弃本次结果');
+                            return;
+                        }
 
                         if (!data.list || data.list.length === 0) {
                             console.log('[刷新线路] 重新搜索未找到结果');
@@ -6051,14 +7113,16 @@
                             vod_play_url: item.vod_play_url || '',
                             latency: undefined,
                             _testType: undefined,
-                            _cachedDetail: undefined
+                            _cachedDetail: undefined,
+                            _useProxy: false,
+                            _proxyUrl: null
                         }));
 
                         console.log(`[刷新线路] 重新搜索完成，找到 ${this.currentGroup.sources.length} 个资源站`);
 
                         // 并行测速所有新资源站
                         const sources = this.currentGroup.sources;
-                        const latencyPromises = sources.map(async (source) => {
+                        const latencyWorker = async (source) => {
                             try {
                                 const detailRes = await fetch(`/api/detail?site_key=${source.site_key}&id=${source.vod_id}&nocache=1`);
                                 const detailData = await detailRes.json();
@@ -6122,9 +7186,17 @@
                                 source.latency = 9999;
                             }
                             return source;
-                        });
+                        };
 
-                        await Promise.all(latencyPromises);
+                        // 🚦 限并发逐批测速（测全部源、最多 6 并发）
+                        await runWithConcurrency(sources, 6, latencyWorker);
+
+                        // 🧭 测速期间用户可能已切换剧集：丢弃过期结果
+                        if (mySeq !== _navSeq || this.currentGroup !== reqGroup) {
+                            console.warn('[刷新线路] 测速完成时上下文已切换，丢弃');
+                            return;
+                        }
+                        this.currentGroup.sourcesTestedAt = Date.now();  // 🕐 记录测速时间(历史回放据此判断缓存新鲜度)
 
                         // 按延迟排序
                         this.currentGroup.sources.sort((a, b) => {
@@ -6144,9 +7216,10 @@
                         console.log('[刷新线路] 完成，最快线路:', this.currentGroup.sources[0]?.site_name, this.currentGroup.sources[0]?.latency + 'ms');
                     } catch (e) {
                         console.error('[刷新线路] 失败:', e);
+                    } finally {
+                        this.isTestingSources = false;
+                        this.refreshingSources = false;
                     }
-                    this.isTestingSources = false;
-                    this.refreshingSources = false;
                 },
 
                 // 解析剧集列表，尝试匹配指定集数
@@ -6180,10 +7253,29 @@
                         this.play(targetEp.url);
                     }
                 },
+                // 🗨️ 构建当前集的 DPlayer 弹幕配置：id="剧名|集名"(交给 /api/danmaku/v3/ 匹配第三方弹幕)。
+                //    未开启弹幕或无剧名时返回 null(DPlayer 不挂弹幕)。api 末尾的斜杠是 DPlayer 约定(它会拼 v3/?id=)。
+                _buildDanmakuOption() {
+                    if (!this.danmakuEnabled) return null;
+                    if (!this.currentGroup || !this.currentGroup.name) return null;
+                    const cur = (this.episodeList || []).find(e => e.url === this.currentUrl);
+                    const epName = (cur && cur.name) || '';
+                    return {
+                        id: encodeURIComponent(this.currentGroup.name + '|' + epName),
+                        api: '/api/danmaku/',
+                        user: '观众',
+                        // 弹幕显示区域由 CSS(.dplayer-danmaku height:33%)限制到顶部 1/3，
+                        // 不用 DPlayer 的 bottm 选项(% 语义按宽度算、不可靠)。unlimited 由用户"海量弹幕"开关控制。
+                        unlimited: false
+                    };
+                },
                 play(url) {
                     this.currentUrl = url;
                     this.playbackErrorCount = 0;  // 重置错误计数
                     this._proxyRetried = false;    // 重置代理重试标记
+                    const playSeq = _navSeq;       // 🧭 记录本次播放的导航上下文（供错误回退判断串剧）
+                    const isFreshPlayer = !dp;     // ▶ 是否新建播放器（决定如何触发首次播放）
+                    this.syncShareUrl();           // 🔗 把当前剧/集写进地址栏（可收藏/分享/深链）
 
                     // 🔆 播放时保持屏幕常亮
                     this.requestWakeLock();
@@ -6215,22 +7307,54 @@
                         console.warn('[播放器] ⚠️ 广告过滤已启用但未配置 CORS_PROXY_URL，无法过滤');
                     }
 
+                    // ⚠️ setupErrorHandling 只在首次创建播放器时绑定一次，其闭包会冻结"首个 play()"的局部变量
+                    //   （playSeq / originalUrl / adFilterProxyUsed）。后续切换不会重绑，导致错误处理读到的是旧值：
+                    //    - playSeq 被冻结 → 第一部剧之后所有错误都被误判为"旧剧残留"而吞掉 → 自动换源/代理回退失效；
+                    //    - originalUrl/adFilterProxyUsed 被冻结 → 代理回退切到错误的 URL。
+                    //   解决：把这三个"当前播放上下文"每次 play() 都刷新到 this.*，让那个一次性绑定的处理器读到当前值。
+                    this._activePlaySeq = playSeq;
+                    this._activeOriginalUrl = originalUrl;
+                    this._activeAdFilterProxyUsed = adFilterProxyUsed;
+
                     const setupErrorHandling = () => {
                         // 统一错误处理函数（dp.error 和 video.error 都会触发）
                         const handleError = (source) => {
+                            // 🧭 用户已切换到别的剧（_navSeq 变化且 this._activePlaySeq 未被新 play() 刷新到）→ 忽略旧错误
+                            if (this._activePlaySeq !== _navSeq) {
+                                console.log('[播放器] ⏭️ 忽略旧剧残留的错误事件 (' + source + ')');
+                                return;
+                            }
                             // 正在进行代理回退重试时，忽略所有错误（等待重试结果）
                             if (this._proxyRetrying) {
                                 console.log('[播放器] ⏳ 代理回退中，忽略错误 (' + source + ')');
                                 return;
                             }
                             // 如果使用了广告过滤代理，先回退到直连重试
-                            if (adFilterProxyUsed && !this._proxyRetried) {
+                            if (this._activeAdFilterProxyUsed && !this._proxyRetried) {
                                 this._proxyRetried = true;
                                 this._proxyRetrying = true;
-                                console.log('[播放器] 🛡️ 代理播放失败，回退直连:', originalUrl.substring(0, 60));
-                                dp.switchVideo({ url: originalUrl, type: 'hls' });
-                                // 3秒后解除锁定（足够 switchVideo 完成加载）
-                                setTimeout(() => { this._proxyRetrying = false; }, 3000);
+                                const fb = this._activeOriginalUrl;
+                                console.log('[播放器] 🛡️ 代理播放失败，回退直连:', (fb || '').substring(0, 60));
+                                dp.switchVideo({ url: fb, type: 'hls' });
+                                // 回退后等就绪再播放（switchVideo 不会自动播放）
+                                const onMeta = () => {
+                                    dp.video.removeEventListener('loadedmetadata', onMeta);
+                                    const p = dp.play();
+                                    if (p && typeof p.catch === 'function') p.catch(() => { });
+                                    if (typeof window._syncPlayOverlays === 'function') window._syncPlayOverlays();
+                                };
+                                if (dp.video && dp.video.readyState >= 1) onMeta();
+                                else if (dp.video) dp.video.addEventListener('loadedmetadata', onMeta);
+                                // 3秒后解除锁定（足够 switchVideo 完成加载）；若回退直连后仍未起播
+                                //（代理 403 + 直连 CORS/拒连都失败，此时不会再触发 error 事件 → 原先会永久卡黑屏）→ 自动切下一个源
+                                setTimeout(() => {
+                                    this._proxyRetrying = false;
+                                    if (this._activePlaySeq === _navSeq && dp && dp.video &&
+                                        dp.video.readyState < 3 && (dp.video.currentTime || 0) === 0) {
+                                        console.log('[播放器] 代理+直连均失败，自动切换下一个源');
+                                        this.handlePlaybackError();
+                                    }
+                                }, 3000);
                                 return;
                             }
                             this.handlePlaybackError();
@@ -6242,6 +7366,12 @@
                             dp.video.addEventListener('error', () => handleError('video'));
                         }
                     };
+
+                    // 🗨️ 本集弹幕配置(弹幕开启且匹配到剧名时返回，否则 undefined)。
+                    //    仅当"集数变化"(id 变)时才在 switchVideo 里重载弹幕——同集换源/代理回退不重载，避免弹幕闪烁与重复拉取。
+                    const danmakuOpt = this._buildDanmakuOption();
+                    const danmakuReload = !!danmakuOpt && danmakuOpt.id !== this._lastDanmakuId;
+                    if (danmakuOpt) this._lastDanmakuId = danmakuOpt.id;
 
                     if (!dp) {
                         console.log('[播放器] 创建新的 DPlayer 实例');
@@ -6255,6 +7385,7 @@
                             loop: false,             // 循环播放（可在设置中切换）
                             playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3],  // 0.25间隔倍速选项
                             video: { url: finalUrl, type: 'hls' },
+                            danmaku: danmakuOpt || undefined,  // 🗨️ 弹幕(借第三方聚合)；未开启则 undefined(DPlayer 不初始化弹幕)
                             contextmenu: [
                                 { text: '🎬 E视界MAX', link: '/' },
                                 { text: '⚡ 当前速度: 1x', click: () => { } }
@@ -6392,6 +7523,24 @@
                         dp.on('webfullscreen', handleEnterFullscreen);
                         dp.on('webfullscreen_cancel', handleExitFullscreen);
 
+                        // 🗨️ 弹幕开关：用户在齿轮里切换"显示弹幕"时，记住偏好(本地+服务器,跨设备)。
+                        //    DPlayer 已把状态写进 localStorage(dplayer-danmaku-show)；这里再同步到服务器。
+                        dp.on('danmaku_show', () => this.pushDanmakuPref(false));
+                        dp.on('danmaku_hide', () => this.pushDanmakuPref(true));
+
+                        // 🗨️ 保证"自己发的弹幕"一定显示：DPlayer 发送时也走轨道占用判定，顶部 1/3 区域轨道少、
+                        //    关海量时高能片段常无空轨 → 自己发的被丢弃。包一层：发送那一刻临时开 unlimited(允许重叠)，
+                        //    画完即恢复用户设置——只影响这一条、不影响其它弹幕，也不会重复画。
+                        if (dp.danmaku && typeof dp.danmaku.send === 'function' && !dp.danmaku._sendPatched) {
+                            const _origSend = dp.danmaku.send.bind(dp.danmaku);
+                            dp.danmaku.send = function (e, t) {
+                                const was = dp.danmaku.unlimited;
+                                dp.danmaku.unlimited = true;
+                                try { _origSend(e, t); } finally { dp.danmaku.unlimited = was; }
+                            };
+                            dp.danmaku._sendPatched = true;
+                        }
+
                         // ========== 🔧 设置菜单修复 ==========
                         setTimeout(() => {
                             const dplayerContainer = document.getElementById('dplayer');
@@ -6406,6 +7555,8 @@
                                             const isOpen = settingBox.classList.contains('dplayer-setting-box-open');
                                             // 当设置菜单打开时，禁用遮罩层的点击事件
                                             mask.style.pointerEvents = isOpen ? 'none' : 'auto';
+                                            // 互斥：打开视频设置(齿轮)时关掉弹幕设置面板
+                                            if (isOpen) { const dmp = document.querySelector('#dplayer .dm-settings-panel'); if (dmp) dmp.style.display = 'none'; }
                                             console.log('[Settings] Menu ' + (isOpen ? 'OPENED - mask disabled' : 'CLOSED - mask enabled'));
 
                                             // 打开菜单时，强制刷新一次倍速高亮
@@ -6578,6 +7729,154 @@
                                     }
                                 };
 
+                                // ========== 🗨️ 弹幕样式管理器(B站风：区域/速度/字号，齿轮菜单可调，本地记住) ==========
+                                window.danmakuStyle = {
+                                    // 行数/速度(1-10,越大越快)/字号(px)/不透明度(%) —— 都用滑块；fontfam=字体(空=默认)
+                                    cfg: { rows: 6, speed: 7, font: 22, opacity: 80, fontfam: '' },
+                                    FONTS: [{ label: '默认', v: '' }, { label: '微软雅黑', v: '"Microsoft YaHei",微软雅黑' }, { label: '黑体', v: 'SimHei,黑体' }, { label: '宋体', v: 'SimSun,宋体' }, { label: '楷体', v: 'KaiTi,楷体' }, { label: '仿宋', v: 'FangSong,仿宋' }],
+                                    FMT: { rows: v => v + ' 行', speed: v => 'Lv.' + v, font: v => v + 'px', opacity: v => v + '%' },
+                                    dur() { return (22 - this.cfg.speed * 2) + 's'; },        // 速度1→20s … 7→8s … 10→2s
+                                    rowH() { return (typeof dp !== 'undefined' && dp && dp.danmaku && dp.danmaku.options && dp.danmaku.options.height) || 30; },
+                                    load() {
+                                        try { const s = JSON.parse(localStorage.getItem('donggua_dm_style') || '{}'); if (s && typeof s === 'object') this.cfg = Object.assign(this.cfg, s); } catch (e) { }
+                                        // 兼容旧版(存的是 area/字符串speed)：迁移到行数/数字speed
+                                        if (typeof this.cfg.speed === 'string') this.cfg.speed = 7;
+                                        if (this.cfg.area != null && this.cfg.rows == null) this.cfg.rows = 6;
+                                        this.apply();
+                                    },
+                                    save() {
+                                        const c = { rows: this.cfg.rows, speed: this.cfg.speed, font: this.cfg.font, opacity: this.cfg.opacity, fontfam: this.cfg.fontfam };
+                                        try { localStorage.setItem('donggua_dm_style', JSON.stringify(c)); } catch (e) { }
+                                        // 跨设备同步：推到服务器(和弹幕开关一样)
+                                        try { if (window.vueApp && window.vueApp.pushDanmakuStyle) window.vueApp.pushDanmakuStyle(c); } catch (e) { }
+                                    },
+                                    // 外部(服务器同步拉取)写入配置：合并→应用→本地存(不回推服务器,避免环)→刷新已挂载面板的滑块/数值
+                                    setCfg(newCfg) {
+                                        if (!newCfg || typeof newCfg !== 'object') return;
+                                        ['rows', 'speed', 'font', 'opacity'].forEach(k => { if (typeof newCfg[k] === 'number') this.cfg[k] = newCfg[k]; });
+                                        if (typeof newCfg.fontfam === 'string') this.cfg.fontfam = newCfg.fontfam;
+                                        try { localStorage.setItem('donggua_dm_style', JSON.stringify({ rows: this.cfg.rows, speed: this.cfg.speed, font: this.cfg.font, opacity: this.cfg.opacity, fontfam: this.cfg.fontfam })); } catch (e) { }
+                                        this.apply();
+                                        const panel = document.querySelector('#dplayer .dm-settings-panel');
+                                        if (panel) ['rows', 'speed', 'font', 'opacity'].forEach(k => {
+                                            const r = panel.querySelector(`.dm-set-range[data-key="${k}"]`); if (r) r.value = this.cfg[k];
+                                            const v = panel.querySelector(`.dm-set-val[data-for="${k}"]`); if (v && this.FMT[k]) v.textContent = this.FMT[k](this.cfg[k]);
+                                        });
+                                    },
+                                    apply() {
+                                        const el = document.getElementById('dplayer');
+                                        if (el) {
+                                            el.style.setProperty('--dm-area', (this.cfg.rows * this.rowH()) + 'px'); // 行数×单行高=容器限高(=可见轨道数)
+                                            el.style.setProperty('--dm-dur', this.dur());
+                                            el.style.setProperty('--dm-fontsize', this.cfg.font + 'px');
+                                            el.style.setProperty('--dm-fontfamily', this.cfg.fontfam || 'inherit');
+                                        }
+                                        try { if (typeof dp !== 'undefined' && dp && dp.danmaku && typeof dp.danmaku.opacity === 'function') dp.danmaku.opacity(this.cfg.opacity / 100); } catch (e) { }
+                                    },
+                                    mount() {
+                                        const c = document.getElementById('dplayer');
+                                        if (!c) return;
+                                        const iconsRight = c.querySelector('.dplayer-icons-right');
+                                        // "弹幕设置"按钮：插在 视频设置(齿轮) 之前 → 顺序：下一集 → 发送弹幕 → 弹幕设置 → 设置 → 全屏
+                                        if (iconsRight && !iconsRight.querySelector('.dplayer-dmset-icon')) {
+                                            const btnHtml = `
+                                                <div class="dplayer-icon dplayer-dmset-icon" data-balloon="弹幕设置" data-balloon-pos="up">
+                                                    <span class="dplayer-icon-content" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;">
+                                                        <i class="fas fa-sliders-h" style="font-size:17px;"></i>
+                                                    </span>
+                                                </div>`;
+                                            const settingEl = iconsRight.querySelector('.dplayer-setting');
+                                            if (settingEl) settingEl.insertAdjacentHTML('beforebegin', btnHtml);
+                                            else iconsRight.insertAdjacentHTML('beforeend', btnHtml);
+                                        }
+                                        // 面板：显示弹幕/海量弹幕 开关 + 行数/速度/字号/不透明度 滑块
+                                        if (!c.querySelector('.dm-settings-panel')) {
+                                            const dmShown = !(typeof dp !== 'undefined' && dp && dp.danmaku) || dp.danmaku.showing !== false;
+                                            const dmUnlim = !!(typeof dp !== 'undefined' && dp && dp.danmaku && dp.danmaku.unlimited);
+                                            const tg = (key, label, on) => `
+                                                <div class="dm-set-row">
+                                                    <span class="dm-set-label">${label}</span>
+                                                    <div class="dm-toggle ${on ? 'dm-on' : ''}" data-key="${key}"><span class="dm-knob"></span></div>
+                                                </div>`;
+                                            const sl = (key, label, min, max, step) => `
+                                                <div class="dm-set-row">
+                                                    <span class="dm-set-label">${label}</span>
+                                                    <input type="range" class="dm-set-range" data-key="${key}" min="${min}" max="${max}" step="${step}" value="${this.cfg[key]}">
+                                                    <span class="dm-set-val" data-for="${key}">${this.FMT[key](this.cfg[key])}</span>
+                                                </div>`;
+                                            c.insertAdjacentHTML('beforeend', `
+                                                <div class="dm-settings-panel" style="display:none;">
+                                                    <div class="dm-set-title">弹幕设置</div>
+                                                    ${tg('show', '显示弹幕', dmShown)}
+                                                    ${tg('unlimited', '海量弹幕', dmUnlim)}
+                                                    ${sl('rows', '行数', 1, 20, 1)}
+                                                    ${sl('speed', '速度', 1, 10, 1)}
+                                                    ${sl('font', '字号', 12, 44, 1)}
+                                                    ${sl('opacity', '不透明度', 10, 100, 5)}
+                                                    <div class="dm-set-row dm-font-toggle" style="cursor:pointer;">
+                                                        <span class="dm-set-label">字体</span>
+                                                        <span class="dm-set-val dm-font-cur-label" style="width:auto;flex:1;text-align:right;">${(this.FONTS.find(f => f.v === this.cfg.fontfam) || this.FONTS[0]).label}</span>
+                                                        <span class="dm-set-arrow">▼</span>
+                                                    </div>
+                                                    <div class="dm-font-list">
+                                                        ${this.FONTS.map(f => `<div class="dm-font-item ${f.v === this.cfg.fontfam ? 'dm-font-cur' : ''}" data-v="${f.v}" style="font-family:${f.v || 'inherit'};">${f.label}</div>`).join('')}
+                                                    </div>
+                                                </div>`);
+                                            const panel = c.querySelector('.dm-settings-panel');
+                                            const btn = c.querySelector('.dplayer-dmset-icon');
+                                            // 字体：点"字体"行展开子列表(每项用各自字体显示)，点某字体即应用
+                                            const fontToggle = panel.querySelector('.dm-font-toggle');
+                                            const fontList = panel.querySelector('.dm-font-list');
+                                            if (fontToggle && fontList) {
+                                                fontToggle.addEventListener('click', (e) => { e.stopPropagation(); fontList.classList.toggle('open'); });
+                                                fontList.querySelectorAll('.dm-font-item').forEach(it => it.addEventListener('click', (e) => {
+                                                    e.stopPropagation();
+                                                    this.cfg.fontfam = it.getAttribute('data-v') || '';
+                                                    this.apply(); this.save();
+                                                    fontList.querySelectorAll('.dm-font-item').forEach(x => x.classList.remove('dm-font-cur'));
+                                                    it.classList.add('dm-font-cur');
+                                                    const lbl = panel.querySelector('.dm-font-cur-label'); if (lbl) lbl.textContent = it.textContent;
+                                                    fontList.classList.remove('open');
+                                                }));
+                                            }
+                                            panel.querySelectorAll('.dm-set-range').forEach(r => {
+                                                const onChange = (e) => {
+                                                    e.stopPropagation();
+                                                    const key = r.getAttribute('data-key');
+                                                    this.cfg[key] = parseInt(r.value, 10);
+                                                    const v = panel.querySelector(`.dm-set-val[data-for="${key}"]`);
+                                                    if (v) v.textContent = this.FMT[key](this.cfg[key]);
+                                                    this.apply(); this.save();
+                                                };
+                                                r.addEventListener('input', onChange);
+                                                r.addEventListener('click', e => e.stopPropagation());
+                                            });
+                                            // 开关：显示弹幕 / 海量弹幕(直接驱动 DPlayer；原生 danmaku_show/hide 事件负责本地+服务器持久化)
+                                            panel.querySelectorAll('.dm-toggle').forEach(t => t.addEventListener('click', (e) => {
+                                                e.stopPropagation();
+                                                const key = t.getAttribute('data-key');
+                                                const on = !t.classList.contains('dm-on');
+                                                t.classList.toggle('dm-on', on);
+                                                try {
+                                                    if (key === 'show' && dp && dp.danmaku) { on ? dp.danmaku.show() : dp.danmaku.hide(); }
+                                                    else if (key === 'unlimited') { if (dp && dp.danmaku) dp.danmaku.unlimit(on); if (dp && dp.user) dp.user.set('unlimited', on ? 1 : 0); }
+                                                } catch (err) { }
+                                            }));
+                                            if (btn) btn.addEventListener('click', (e) => {
+                                                e.stopPropagation();
+                                                const willOpen = panel.style.display === 'none';
+                                                panel.style.display = willOpen ? 'block' : 'none';
+                                                // 互斥：打开弹幕设置时关掉视频设置(齿轮)
+                                                if (willOpen) { const sb = c.querySelector('.dplayer-setting-box'); if (sb) sb.classList.remove('dplayer-setting-box-open'); }
+                                            });
+                                            // 点面板/按钮之外关闭
+                                            c.addEventListener('click', (e) => {
+                                                if (panel.style.display !== 'none' && !panel.contains(e.target) && !(btn && btn.contains(e.target))) panel.style.display = 'none';
+                                            });
+                                        }
+                                    }
+                                };
+
                                 // 监听播放器事件
                                 dp.on('timeupdate', () => {
                                     if (dp.video && window.skipManager) window.skipManager.check(dp.video.currentTime);
@@ -6589,6 +7888,7 @@
 
                                 // 初始加载配置
                                 window.skipManager.load();
+                                window.danmakuStyle.load();  // 应用弹幕区域/速度/字号(本地记住)
 
                                 // 注入“下一集”按钮
                                 {
@@ -6611,6 +7911,9 @@
                                         }
                                     }
                                 }
+
+                                // 挂载"弹幕设置"按钮+滑块面板(控件此时已就绪)
+                                if (window.danmakuStyle) window.danmakuStyle.mount();
 
                                 // 再次点击设置按钮时关闭设置菜单
                                 const settingIcon = dplayerContainer.querySelector('.dplayer-setting-icon');
@@ -6642,6 +7945,42 @@
                                         wasOpenBeforeClick = false; // 重置状态
                                     });
                                 }
+
+                                // 🎯 捕获阶段拦在 DPlayer 的播放切换之前，统一处理"点视频/控制栏"的两类问题：
+                                //   ① 菜单(设置/速度子菜单/弹幕面板)开着时点视频 → 关菜单+隐藏控制栏，不暂停。
+                                //   ② DPlayer 把"控制栏暗化层(.dplayer-controller-mask，即底部那条渐变)"也绑了点击切换播放，
+                                //      用户瞄准齿轮却点到旁边的暗化层就会误暂停 → 拦掉它(底部控制区不该是暂停热区)。
+                                dplayerContainer.addEventListener('click', (e) => {
+                                    // 点在真正的控件/各类菜单/弹幕设置上 → 不拦截，照常工作
+                                    if (e.target.closest('.dplayer-controller, .dplayer-setting-box, .dplayer-menu, .dplayer-comment-box, .dm-settings-panel, .dplayer-dmset-icon')) return;
+                                    const settingOpen = settingBox && settingBox.classList.contains('dplayer-setting-box-open');
+                                    const dmPanel = dplayerContainer.querySelector('.dm-settings-panel');
+                                    const dmOpen = dmPanel && dmPanel.style.display === 'block';
+                                    const onCtrlMask = !!e.target.closest('.dplayer-controller-mask');  // 底部控制栏渐变区
+                                    if (!settingOpen && !dmOpen) {
+                                        // 没菜单开着：点底部控制栏渐变区 → 拦掉误暂停(什么都不做，留住控制栏)；点真正视频区 → 放行(正常播放/暂停)
+                                        if (onCtrlMask) { e.preventDefault(); e.stopImmediatePropagation(); }
+                                        return;
+                                    }
+                                    // 有菜单开着：拦下这次点击，关掉菜单 + 隐藏控制栏，不触发暂停
+                                    e.preventDefault();
+                                    e.stopImmediatePropagation();
+                                    if (settingOpen) {
+                                        settingBox.classList.remove('dplayer-setting-box-open');
+                                        const ss = settingBox.querySelector('.dplayer-setting-speed'); if (ss) ss.classList.add('dplayer-setting-box-hide');
+                                        const so = settingBox.querySelector('.dplayer-setting-origin'); if (so) so.classList.remove('dplayer-setting-box-hide');
+                                    }
+                                    if (dmOpen) dmPanel.style.display = 'none';
+                                    dplayerContainer.classList.add('dplayer-hide-controller');  // 隐藏控制栏
+                                }, true);
+
+                                // 💾 用户在速度菜单里"手动选倍率"(含 1x 正常) → 显式记住，跨集/跨会话保持(本地，不走服务器)
+                                settingBox.addEventListener('click', (e) => {
+                                    const item = e.target.closest('.dplayer-setting-speed-item');
+                                    if (!item) return;
+                                    const sp = parseFloat(item.dataset.speed);
+                                    if (!isNaN(sp)) { try { localStorage.setItem('dplayer_speed', sp); } catch (err) { } }
+                                });
 
                                 console.log('[Settings] Fix applied - monitoring setting box state');
                             }
@@ -6870,6 +8209,37 @@
                             }
                         });
 
+                        // 🔄 以"视频真实状态"为准同步中央/移动遮罩图标（修复切换资源后图标反向）
+                        //    dp.on('play') 可能在 HLS 未就绪时被乐观触发，导致图标与实际(暂停)相反；
+                        //    本函数直接读 dp.video.paused，由原生 play/playing/pause 事件与切换后重同步调用。
+                        window._syncPlayOverlays = () => {
+                            if (!dp || !dp.video) return;
+                            const paused = dp.video.paused;
+                            [desktopPlayOverlay, mobilePlayOverlay].forEach((ov) => {
+                                if (!ov) return;
+                                ov.innerHTML = paused ? '<i class="fas fa-play"></i>' : '<i class="fas fa-pause"></i>';
+                                ov.classList.toggle('pause-state', !paused);
+                            });
+                            // TV 模式顶部/底部播放键也跟随真实状态（修复遥控或其他方式切换后图标不同步）
+                            const tvTop = document.getElementById('tv-play-pause');
+                            if (tvTop) tvTop.innerHTML = paused ? '▶ 播放' : '⏸ 暂停';
+                            const tvBot = document.getElementById('tv-bottom-play');
+                            if (tvBot) tvBot.innerHTML = paused ? '▶' : '⏸';
+                        };
+                        // 绑定到当前 video 元素的原生事件（switchVideo 会换/复用 video 元素，需重绑）。
+                        // remove 再 add，保证幂等，无论元素是否新建都不会重复绑定。
+                        window._bindOverlayVideoEvents = () => {
+                            if (!dp || !dp.video) return;
+                            const v = dp.video;
+                            // 📺 提前声明允许 AirPlay/远程播放 + 内联播放（否则 iOS 投屏可能搜不到设备）
+                            try { v.setAttribute('x-webkit-airplay', 'allow'); v.setAttribute('playsinline', ''); v.removeAttribute('disableRemotePlayback'); } catch (e) { }
+                            ['play', 'playing', 'pause', 'ended', 'waiting', 'canplay'].forEach((ev) => {
+                                v.removeEventListener(ev, window._syncPlayOverlays);
+                                v.addEventListener(ev, window._syncPlayOverlays);
+                            });
+                        };
+                        window._bindOverlayVideoEvents();
+
                         // 点击中央按钮事件
                         mobilePlayOverlay.addEventListener('touchend', (e) => {
                             e.preventDefault(); // 阻止冒泡防止触发背景点击
@@ -6887,9 +8257,68 @@
                             }, 3000);
                         });
 
+                        // ========== 📱 左/右 1/3 屏幕上下滑：亮度/音量 ==========
+                        // 左 1/3 上下滑=亮度(CSS filter,网页拿不到系统亮度)；右 1/3 上下滑=音量。
+                        // 竖向滑动锁定后 preventDefault(passive:false)防页面滚动；横向滑动放弃(留给双击/原生)。
+                        // _swipeConsumed 防止滑完抬手被下面的"双击/单击检测"误判成点击切控制栏。
+                        let _swipeConsumed = false;
+                        {
+                            let _gx = 0, _gy = 0, _gmode = null, _gstart = 0;
+                            const gInd = document.createElement('div');
+                            gInd.className = 'gesture-indicator';
+                            container.appendChild(gInd);
+                            let _gHideTimer = null;
+                            const gShow = (txt) => { gInd.textContent = txt; gInd.classList.add('show'); clearTimeout(_gHideTimer); };
+                            const gHide = () => { _gHideTimer = setTimeout(() => gInd.classList.remove('show'), 700); };
+                            container.addEventListener('touchstart', (e) => {
+                                _gmode = null;
+                                if (e.touches.length !== 1) return;
+                                if (e.target.closest('.dplayer-controller, .dplayer-setting-box, .dm-settings-panel, .mobile-play-overlay, .dplayer-mask, .dplayer-comment-box, .dplayer-bar-wrap')) return;
+                                const rect = container.getBoundingClientRect();
+                                _gx = e.touches[0].clientX; _gy = e.touches[0].clientY;
+                                const rx = (_gx - rect.left) / rect.width;
+                                if (rx <= 1 / 3) _gmode = 'bri?';
+                                else if (rx >= 2 / 3) _gmode = 'vol?';
+                            }, { passive: true });
+                            container.addEventListener('touchmove', (e) => {
+                                if (!_gmode) return;
+                                const dx = e.touches[0].clientX - _gx, dy = e.touches[0].clientY - _gy;
+                                if (_gmode === 'bri?' || _gmode === 'vol?') {
+                                    if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx) * 1.2) {
+                                        // 锁定为竖向手势，记录起始值
+                                        if (_gmode === 'vol?') { _gmode = 'vol'; _gstart = (dp && dp.video) ? dp.video.volume : 1; }
+                                        else { _gmode = 'bri'; _gstart = window._videoBrightness || 1; }
+                                    } else if (Math.abs(dx) > 18) { _gmode = null; return; }
+                                    else return;
+                                }
+                                if (e.cancelable) e.preventDefault();  // 已锁定竖向手势 → 阻止页面滚动
+                                const rect = container.getBoundingClientRect();
+                                const delta = -dy / (rect.height * 0.7);  // 上滑为正；滑约 70% 屏高 = 全程
+                                if (_gmode === 'vol' && dp) {
+                                    const v = Math.min(1, Math.max(0, _gstart + delta));
+                                    try { dp.volume(v, true, true); } catch (err) { }
+                                    gShow('🔊 音量 ' + Math.round(v * 100) + '%');
+                                    _swipeConsumed = true;
+                                } else if (_gmode === 'bri' && dp && dp.video) {
+                                    const b = Math.min(2, Math.max(0.2, _gstart + delta * 1.6));
+                                    window._videoBrightness = b;
+                                    try { dp.video.style.filter = 'brightness(' + b.toFixed(2) + ')'; } catch (err) { }
+                                    gShow('🔆 亮度 ' + Math.round(b * 100) + '%');
+                                    _swipeConsumed = true;
+                                }
+                            }, { passive: false });
+                            container.addEventListener('touchend', () => {
+                                if (_gmode === 'vol') { try { dp.volume(dp.video.volume, false, true); } catch (err) { } gHide(); }  // 抬手时才落一次音量存储
+                                else if (_gmode === 'bri') gHide();
+                                _gmode = null;
+                            }, { passive: true });
+                        }
+
                         // 双击检测
                         // 双击检测
                         container.addEventListener('touchend', (e) => {
+                            // 🎚️ 刚完成音量/亮度滑动手势 → 这次抬手不算点击(防止误切控制栏/误判双击)
+                            if (_swipeConsumed) { _swipeConsumed = false; return; }
                             // 忽略控制栏区域和自定义按钮的点击
                             // 忽略控制栏区域、自定义按钮以及 DPlayer 遮罩的点击
                             if (e.target.closest('.dplayer-controller') ||
@@ -6918,19 +8347,19 @@
 
                                 if (isLeftSide && dp.video) {
                                     // 左侧双击 - 快退
-                                    const newTime = Math.max(0, dp.video.currentTime - SEEK_SECONDS);
-                                    dp.seek(newTime);
+                                    safeSeekBy(-SEEK_SECONDS);
                                     seekHintLeft.classList.add('show');
                                     setTimeout(() => seekHintLeft.classList.remove('show'), 600);
                                 } else if (isRightSide && dp.video) {
                                     // 右侧双击 - 快进
-                                    const newTime = Math.min(dp.video.duration || 0, dp.video.currentTime + SEEK_SECONDS);
-                                    dp.seek(newTime);
+                                    safeSeekBy(SEEK_SECONDS);
                                     seekHintRight.classList.add('show');
                                     setTimeout(() => seekHintRight.classList.remove('show'), 600);
                                 } else if (isCenter) {
                                     // 中间双击 - 暂停/播放
                                     dp.toggle();
+                                    // 暂停后显示中央按钮以便再次点击续播
+                                    setTimeout(() => updateOverlayState(mobilePlayOverlay), 50);
                                 }
                             } else {
                                 // 第一次点击，等待检测双击
@@ -7047,7 +8476,7 @@
 
                                 if (saved) {
                                     const savedData = JSON.parse(saved);
-                                    const savedTime = savedData.time;
+                                    const savedTime = Number(savedData.time);
                                     const savedDate = new Date(savedData.date);
                                     const now = new Date();
                                     const daysDiff = (now - savedDate) / (1000 * 60 * 60 * 24);
@@ -7068,7 +8497,7 @@
                                         // 记录跳转前的时间
                                         const beforeSeek = dp.video.currentTime;
 
-                                        dp.seek(savedTime);
+                                        safeSeek(savedTime);
 
                                         // 延迟检查跳转是否成功
                                         setTimeout(() => {
@@ -7231,8 +8660,51 @@
 
                         let progressRestored = false;
 
-                        dp.switchVideo({ url: finalUrl, type: 'hls' });
+                        // 🧹 修复 Hls 实例泄漏：DPlayer.switchVideo 会新建 Hls 但不销毁旧的。
+                        //    安全时序——先捕获旧实例，switchVideo 创建新实例后，等"新流真正 playing"
+                        //    再销毁旧的：此时 <video> 已挂上可用的新源，detach 旧实例不会触发"无源"报错，
+                        //    从而既回收泄漏又不会误跳过线路（旧实现是在 switchVideo 前 destroy 才出的问题）。
+                        const _oldHls = (dp.plugins && dp.plugins.hls) || null;
+
+                        // 🗨️ 仅"换集"(danmakuReload)时重载弹幕；同集换源/代理回退不传第二参(DPlayer 保留当前弹幕，不闪烁/不重拉)
+                        dp.switchVideo({ url: finalUrl, type: 'hls' }, danmakuReload ? danmakuOpt : undefined);
                         console.log('[进度记忆-切换] switchVideo 已调用' + (finalUrl !== url ? ' (代理模式)' : ''));
+
+                        if (_oldHls) {
+                            let _destroyed = false;  // 防止 'playing' 与 5s 兜底重复销毁
+                            const destroyOldHls = () => {
+                                if (_destroyed) return;
+                                _destroyed = true;
+                                if (dp.video) dp.video.removeEventListener('playing', destroyOldHls);
+                                // 仅当它确实是被替换掉的旧实例时才销毁，避免误杀当前实例
+                                if (_oldHls !== (dp.plugins && dp.plugins.hls)) {
+                                    try { _oldHls.destroy(); } catch (e) { }
+                                }
+                            };
+                            if (dp.video) dp.video.addEventListener('playing', destroyOldHls);
+                            // 兜底：5秒后无论是否 playing 都回收（仍只在它非当前实例时）
+                            setTimeout(destroyOldHls, 5000);
+                        }
+
+                        // ▶ 修复"切换资源/集数后不自动播放 + 中央大按钮图标反向"：
+                        //   switchVideo 会复用同一个 <video> 元素但重置 src，HLS 尚未就绪时立刻 dp.play()
+                        //   既无法真正播放，又会让 dp.on('play') 乐观地把中央按钮设成⏸而与实际(暂停)相反。
+                        //   改为：重绑遮罩的原生事件 → 等 loadedmetadata 就绪再播放 → 多次按真实状态同步图标。
+                        if (typeof window._bindOverlayVideoEvents === 'function') {
+                            window._bindOverlayVideoEvents();  // 幂等重绑（remove 再 add）到复用的 video 元素
+                        }
+                        const playAfterSwitch = () => {
+                            dp.video.removeEventListener('loadedmetadata', playAfterSwitch);  // 先解绑，避免中途切走时泄漏
+                            if (playSeq !== _navSeq) return;  // 🧭 已切换到别的剧，放弃
+                            const pr = dp.play();
+                            if (pr && typeof pr.catch === 'function') pr.catch(() => { });
+                            if (typeof window._syncPlayOverlays === 'function') {
+                                window._syncPlayOverlays();
+                                setTimeout(window._syncPlayOverlays, 300);
+                            }
+                        };
+                        if (dp.video && dp.video.readyState >= 1) playAfterSwitch();
+                        else if (dp.video) dp.video.addEventListener('loadedmetadata', playAfterSwitch);
 
                         // 🛡️ 广告过滤已在 CF Worker 完成（M3U8 URL 已通过 corsProxyUrl 路由）
 
@@ -7259,7 +8731,7 @@
 
                                 if (saved) {
                                     const savedData = JSON.parse(saved);
-                                    const savedTime = savedData.time;
+                                    const savedTime = Number(savedData.time);
                                     const savedDate = new Date(savedData.date);
                                     const daysDiff = (new Date() - savedDate) / (1000 * 60 * 60 * 24);
 
@@ -7274,7 +8746,7 @@
                                     if (isTimeOK && isMinOK && isMaxOK) {
                                         setTimeout(() => {
                                             console.log('[进度记忆-切换] 执行 seek 到:', savedTime);
-                                            dp.seek(savedTime);
+                                            safeSeek(savedTime);
                                             dp.notice(`▶ 已恢复上次观看位置`, 2000);
 
                                             setTimeout(() => {
@@ -7303,8 +8775,10 @@
                         // 使用命名函数引用 + 移除旧监听器，防止累积
                         const _rateChangeHandler = () => {
                             const speed = dp.video.playbackRate;
+                            // 只保存"非 1x"的倍率：换集/HLS 加载会把倍率重置回 1x 并触发 ratechange，存它会覆盖用户倍率。
+                            // 用户"手动选 1x(正常)"由速度菜单点击单独保存。
                             try {
-                                localStorage.setItem('dplayer_speed', speed);
+                                if (speed && speed !== 1) localStorage.setItem('dplayer_speed', speed);
                             } catch (e) { }
                         };
                         setTimeout(() => {
@@ -7317,7 +8791,8 @@
                             }
                         }, 100);
                     }
-                    dp.play();
+                    // 新建播放器：直接播放；切换资源/集数：由 else 分支的 playAfterSwitch 在就绪后播放
+                    if (isFreshPlayer) dp.play();
 
                     // 📺 TV 模式：自动全屏 + 添加控制栏按钮
                     if (this.isTVMode) {
@@ -7482,7 +8957,7 @@
                                         rewindBtn.style.cssText = 'background:#444;border-radius:8px;padding:12px 20px;color:#fff;border:none;cursor:pointer;font-size:16px;';
                                         rewindBtn.onclick = () => {
                                             if (dp && dp.video) {
-                                                dp.video.currentTime = Math.max(0, dp.video.currentTime - 10);
+                                                safeSeekBy(-10);
                                                 dp.notice('⏪ 快退 10 秒');
                                             }
                                         };
@@ -7510,7 +8985,7 @@
                                         forwardBtn.style.cssText = 'background:#444;border-radius:8px;padding:12px 20px;color:#fff;border:none;cursor:pointer;font-size:16px;';
                                         forwardBtn.onclick = () => {
                                             if (dp && dp.video) {
-                                                dp.video.currentTime = Math.min(dp.video.duration || 0, dp.video.currentTime + 10);
+                                                safeSeekBy(10);
                                                 dp.notice('⏩ 快进 10 秒');
                                             }
                                         };
@@ -7635,30 +9110,49 @@
                     // 避免重复触发
                     if (this.isAutoRetrying || this.playbackErrorCount > 1) return;
 
-                    // 获取当前线路索引
-                    const allSources = this.availableSources;
-                    const currentIndex = allSources.findIndex(s => s.site_key === this.currentSource?.site_key);
+                    // 🧭 记录发起时的导航上下文，1.5s 后若已切换剧集则放弃自动切换（防串剧）
+                    const mySeq = _navSeq;
 
-                    // 如果还有下一个线路可用，自动切换
+                    // 获取当前线路索引（记住失败源，宽限期后用于判定是否真的要跳过）
+                    const allSources = this.availableSources;
+                    const failingSource = this.currentSource;
+                    const currentIndex = allSources.findIndex(s => s.site_key === failingSource?.site_key);
+
+                    // 如果还有下一个线路可用，给一段宽限期后再决定是否切换
                     if (currentIndex >= 0 && currentIndex < allSources.length - 1) {
                         this.isAutoRetrying = true;
                         const nextSource = allSources[currentIndex + 1];
+                        this.autoRetryMessage = `正在检测 ${failingSource?.site_name} 线路...`;
+                        console.log('[Auto-Failover] 收到错误事件，进入 1.5s 宽限期检测是否真的不可播');
 
-                        // 显示用户提示
-                        this.autoRetryMessage = `${this.currentSource?.site_name} 播放失败，正在尝试 ${nextSource.site_name}`;
-                        console.log(`[Auto-Failover] ${this.autoRetryMessage}`);
-
-                        // 标记当前线路为不可用（设置高延迟）
-                        if (this.currentSource) {
-                            this.currentSource.latency = 9998;  // 标记为用户端不可用
-                        }
-
-                        // 切换到下一个线路
                         setTimeout(() => {
-                            this.autoRetryMessage = '';  // 清除提示
                             this.isAutoRetrying = false;
+                            // 🧭 已切换到别的剧 → 放弃对旧剧的自动切源
+                            if (mySeq !== _navSeq) { this.autoRetryMessage = ''; return; }
+
+                            // ✅ 关键：宽限期内若该源其实已经能播（只是没自动播放/短暂卡顿/可恢复错误），
+                            //    则不要跳过它——保留为"已加载待播放"，避免把可播放的源误判为失败而跳过。
+                            //    只有真正的 MediaError、或始终无法就绪（无解码帧且无缓冲）才切到下一个源。
+                            // 用户在宽限期内已手动切换线路 → 放弃自动切换，尊重用户选择
+                            const stillSameSource = this.currentSource && this.currentSource.site_key === failingSource?.site_key;
+                            if (!stillSameSource) { this.autoRetryMessage = ''; return; }
+
+                            const v = dp && dp.video;
+                            const isPlayable = v && !v.error && (v.readyState >= 2 || (v.buffered && v.buffered.length > 0));
+                            if (isPlayable) {
+                                console.log('[Auto-Failover] 该源实际可播放（已就绪/有缓冲），取消跳过，保留当前线路');
+                                this.autoRetryMessage = '';
+                                this.playbackErrorCount = 0;  // 允许后续若真正失败再判定
+                                return;
+                            }
+
+                            // 确认不可播 → 标记并切换到下一个线路
+                            this.autoRetryMessage = `${failingSource?.site_name} 播放失败，正在尝试 ${nextSource.site_name}`;
+                            console.log(`[Auto-Failover] ${this.autoRetryMessage}`);
+                            if (failingSource) failingSource.latency = 9998;  // 标记为用户端不可用
                             this.switchSource(nextSource);
-                        }, 1500);  // 显示提示1.5秒后切换
+                            setTimeout(() => { this.autoRetryMessage = ''; }, 1500);
+                        }, 1500);
                     } else {
                         // 没有更多可用线路
                         this.autoRetryMessage = '所有线路均无法播放';
@@ -7686,7 +9180,7 @@
                         this.play(nextEp.url);
 
                         this.$nextTick(() => {
-                            const activeBtn = document.querySelector('.episode-btn.active');
+                            const activeBtn = document.querySelector('.ep-btn.active');
                             if (activeBtn) activeBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         });
                     } else {
