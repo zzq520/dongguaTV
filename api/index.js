@@ -371,10 +371,11 @@ async function fetchDanmakuFromInstance(base, token, title, ep) {
 }
 app.get('/api/danmaku/v3/', async (req, res) => {
     const empty = { code: 0, version: 3, data: [], msg: '' };
-    // 默认短缓存(空/出错 5min)；非空弹幕→7天新鲜+30天 stale-while-revalidate(过期先回旧缓存、后台重抓)。
-    // 缓存加在本接口(键=?id=剧名|集名,稳定)，勿缓存 danmu_api 的 comment/{id}(id会过期)
+    // 空/出错一律 no-store：绝不让 CDN/浏览器缓存"暂时为空"的弹幕(防 CF 1年TTL 把空响应永久冻结)；
+    //   服务器侧 90s miss 缓存护住上游。非空弹幕→7天新鲜+30天 stale-while-revalidate(过期先回旧缓存、后台重抓)。
+    // 缓存键=?id=剧名|集名(稳定)；勿缓存 danmu_api 的 comment/{id}(id会过期)
     const LONG_CACHE = 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=2592000';
-    res.set('Cache-Control', 'public, max-age=90');
+    res.set('Cache-Control', 'no-store');
     const DANMU_API_URL = process.env.DANMU_API_URL;
     if (!DANMU_API_URL) return res.json(empty);
 
@@ -392,15 +393,21 @@ app.get('/api/danmaku/v3/', async (req, res) => {
         const bases = String(DANMU_API_URL).split(',').map(s => s.trim()).filter(Boolean);
         const tokens = String(process.env.DANMU_API_TOKEN || '').split(',').map(s => s.trim());
         const instances = bases.map((b, i) => ({ base: b, token: tokens.length > 1 ? (tokens[i] || '') : (tokens[0] || '') }));
-        let data = [];
-        for (const inst of instances) {
-            try { data = await fetchDanmakuFromInstance(inst.base, inst.token, title, ep); } catch (e) { data = []; }
-            if (data.length) break;
-        }
-        // 全部实例空 → 多为上游限流瞬时空：等 3s 重试第一个实例(Vercel 有 10s 函数上限，谨慎)
+        // 🏁 并行赛跑：所有实例同时查，第一个非空即用——一个实例卡死/401 不拖累其它(原串行先傻等主实例超时才轮到下一个)
+        const raceInstances = async () => {
+            if (!instances.length) return [];
+            const runs = instances.map(inst => (async () => {
+                const d = await fetchDanmakuFromInstance(inst.base, inst.token, title, ep);
+                if (!d.length) throw new Error('empty');
+                return d;
+            })());
+            try { return await Promise.any(runs); } catch (e) { return []; }
+        };
+        let data = await raceInstances();
+        // 全部实例空 → 多为上游限流瞬时空：等 3s 再赛一轮(Vercel 有 10s 函数上限，谨慎)
         if (!data.length && instances.length) {
             await new Promise(r => setTimeout(r, 3000));
-            try { data = await fetchDanmakuFromInstance(instances[0].base, instances[0].token, title, ep); } catch (e) { data = []; }
+            data = await raceInstances();
         }
         data.sort((a, b) => a[0] - b[0]); // 先按时间升序，保证下面按索引均匀采样=按时间均匀采样(后半段不丢)
         if (data.length > DANMAKU_MAX) { const step = data.length / DANMAKU_MAX, s = []; for (let i = 0; i < DANMAKU_MAX; i++) s.push(data[Math.floor(i * step)]); data = s; }
@@ -427,7 +434,9 @@ app.get('/api/config', (req, res) => {
         enable_local_image_cache: false, // Vercel 不支持本地缓存
         sync_enabled: syncEnabled,
         multi_user_mode: ACCESS_PASSWORDS.length > 1,
-        danmaku_enabled: !!process.env.DANMU_API_URL  // 🗨️ 弹幕开关
+        danmaku_enabled: !!process.env.DANMU_API_URL,  // 🗨️ 弹幕开关
+        // 📮 求片：Vercel 无持久 SQLite、不适合求片(需站长长期履行)→ 始终关闭，仅 VPS(server.js) 支持
+        requests_enabled: false
     });
 });
 

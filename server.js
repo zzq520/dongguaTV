@@ -48,6 +48,18 @@ ACCESS_PASSWORDS.forEach((pwd, index) => {
 
 console.log(`[System] Password mode: ${ACCESS_PASSWORDS.length > 1 ? 'Multi-user' : 'Single'} (${ACCESS_PASSWORDS.length} passwords)`);
 
+// 反查：token(=SHA256(独立密码)) → 原始独立密码。仅用于站长后台辨认"是哪个独立密码用户"。
+// 只在 ADMIN_TOKEN 鉴权后的后台接口里用到，不外泄。
+const HASH_TO_PASSWORD = {};
+ACCESS_PASSWORDS.forEach(pwd => { HASH_TO_PASSWORD[crypto.createHash('sha256').update(pwd).digest('hex')] = pwd; });
+// 求片/统计后台展示用：把 token 翻成人能认的身份
+function userIdentity(token, label) {
+    if (label && String(label).trim()) return String(label).trim();
+    if (token && HASH_TO_PASSWORD[token]) return '独立密码: ' + HASH_TO_PASSWORD[token];
+    if (token && String(token).startsWith('v2board_')) return 'v2board用户#' + String(token).slice(8, 16);
+    return (token ? String(token).slice(0, 12) : '匿名');
+}
+
 // 远程配置URL
 const REMOTE_DB_URL = process.env['REMOTE_DB_URL'] || '';
 
@@ -548,9 +560,61 @@ class CacheManager {
                     )
                 `);
 
+                // 历史删除墓碑：记录"某条历史在何时被删"，跨设备同步删除，防止别的设备/旧会话把已删记录复活
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS user_history_deleted (
+                        user_token TEXT NOT NULL,
+                        item_id TEXT NOT NULL,
+                        deleted_at INTEGER NOT NULL,
+                        PRIMARY KEY (user_token, item_id)
+                    )
+                `);
+
+                // 求片：用户提交想看但站内没有的剧；站长在站内后台贴磁力/下载链接履行，用户在"我的求片"看链接自取
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS content_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_token TEXT NOT NULL,
+                        user_label TEXT,
+                        name TEXT NOT NULL,
+                        tmdb_id TEXT,
+                        poster TEXT,
+                        note TEXT,
+                        year TEXT,
+                        aka TEXT,
+                        cast_info TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        fulfill_link TEXT,
+                        fulfill_note TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )
+                `);
+                // 求片：为帮站长准确找片新增的可选字段(年份/外文名又名/导演主演)。
+                // 用幂等 ALTER 给【已存在】的旧表补列(SQLite 列已存在会抛错→吞掉即可)，免破坏旧数据。
+                for (const col of ['year', 'aka', 'cast_info']) {
+                    try { this.db.exec(`ALTER TABLE content_requests ADD COLUMN ${col} TEXT`); } catch (e) { /* 列已存在 */ }
+                }
+
+                // 用户统计/封禁：站长后台据此看每个用户的活跃/封禁。观看数据另从 user_history 现算。
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS user_stats (
+                        user_token TEXT PRIMARY KEY,
+                        label TEXT,
+                        first_seen INTEGER,
+                        last_login INTEGER,
+                        last_active INTEGER,
+                        banned INTEGER NOT NULL DEFAULT 0,
+                        banned_at INTEGER
+                    )
+                `);
+
                 // 创建索引加速过期查询
                 this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expire ON cache(expire)`);
                 this.db.exec(`CREATE INDEX IF NOT EXISTS idx_history_user ON user_history(user_token)`);
+                this.db.exec(`CREATE INDEX IF NOT EXISTS idx_req_user ON content_requests(user_token)`);
+                this.db.exec(`CREATE INDEX IF NOT EXISTS idx_req_status ON content_requests(status)`);
+                this.db.exec(`CREATE INDEX IF NOT EXISTS idx_stats_active ON user_stats(last_active)`);
 
                 // 清理过期数据
                 this.db.prepare('DELETE FROM cache WHERE expire < ?').run(Date.now());
@@ -858,6 +922,11 @@ app.get(['/', '/index.html'], async (req, res) => {
     }
 });
 
+// 站长后台：独立页面(非首页弹窗)。鉴权在前端输入 ADMIN_TOKEN 后由 /api/admin/* 服务端校验。
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/admin.html'));
+});
+
 // 动态注入站点 URL 到 robots.txt
 app.get('/robots.txt', (req, res) => {
     try {
@@ -919,7 +988,11 @@ app.get('/api/config', (req, res) => {
         sync_enabled: syncEnabled,
         multi_user_mode: ACCESS_PASSWORDS.length > 1,
         // 🗨️ 弹幕：配置了 DANMU_API_URL 才开启(前端据此决定是否给播放器挂弹幕)
-        danmaku_enabled: !!process.env.DANMU_API_URL
+        danmaku_enabled: !!process.env.DANMU_API_URL,
+        // 📮 求片：必须配置 ADMIN_TOKEN(站长才能履行)才开启;否则前端整个隐藏入口、后端拒收
+        requests_enabled: !!process.env.ADMIN_TOKEN,
+        // 🚫 封禁：站长在后台封了这个用户 → 前端锁屏
+        banned: isBanned(userToken)
     });
 });
 
@@ -946,6 +1019,7 @@ app.get('/api/history/pull', (req, res) => {
     if (!userInfo) {
         return res.status(401).json({ error: 'Invalid token' });
     }
+    if (isBanned(userToken)) return res.status(403).json({ error: 'banned', banned: true });
     if (!userInfo.syncEnabled) {
         return res.json({ sync_enabled: false, history: [] });
     }
@@ -954,6 +1028,7 @@ app.get('/api/history/pull', (req, res) => {
     if (cacheManager.type !== 'sqlite' || !cacheManager.db) {
         return res.json({ sync_enabled: true, history: [], message: 'SQLite not available' });
     }
+    touchUser(userToken);  // 记录活跃
 
     try {
         const stmt = cacheManager.db.prepare('SELECT item_id, item_data, updated_at FROM user_history WHERE user_token = ?');
@@ -965,7 +1040,10 @@ app.get('/api/history/pull', (req, res) => {
             updated_at: row.updated_at
         }));
 
-        res.json({ sync_enabled: true, history: history });
+        // 删除墓碑：让其它设备据此压制"已删但本地还在"的记录,不再复活
+        const deleted = cacheManager.db.prepare('SELECT item_id, deleted_at FROM user_history_deleted WHERE user_token = ?').all(userToken).map(r => ({ id: r.item_id, deleted_at: r.deleted_at }));
+
+        res.json({ sync_enabled: true, history: history, deleted: deleted });
     } catch (e) {
         console.error('[History Pull Error]', e.message);
         res.status(500).json({ error: 'Database error' });
@@ -974,7 +1052,7 @@ app.get('/api/history/pull', (req, res) => {
 
 // 推送历史记录到服务器
 app.post('/api/history/push', (req, res) => {
-    const { token, history } = req.body;
+    const { token, history, deleted, label } = req.body;
 
     if (!token || !Array.isArray(history)) {
         return res.status(400).json({ error: 'Missing token or history' });
@@ -985,6 +1063,7 @@ app.post('/api/history/push', (req, res) => {
     if (!userInfo) {
         return res.status(401).json({ error: 'Invalid token' });
     }
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
     if (!userInfo.syncEnabled) {
         return res.json({ sync_enabled: false, saved: 0 });
     }
@@ -993,54 +1072,52 @@ app.post('/api/history/push', (req, res) => {
     if (cacheManager.type !== 'sqlite' || !cacheManager.db) {
         return res.json({ sync_enabled: true, saved: 0, message: 'SQLite not available' });
     }
+    touchUser(token, { label });  // 记录活跃 + 邮箱身份(后台显示用)
 
     try {
         const insertStmt = cacheManager.db.prepare(`
             INSERT OR REPLACE INTO user_history (user_token, item_id, item_data, updated_at)
             VALUES (?, ?, ?, ?)
         `);
+        const deleteHist = cacheManager.db.prepare('DELETE FROM user_history WHERE user_token = ? AND item_id = ?');
+        const upsertTomb = cacheManager.db.prepare('INSERT OR REPLACE INTO user_history_deleted (user_token, item_id, deleted_at) VALUES (?, ?, ?)');
 
-        // 获取当前服务器上该用户的所有记录 ID
-        const existingIds = cacheManager.db.prepare(
-            'SELECT item_id FROM user_history WHERE user_token = ?'
-        ).all(token).map(row => row.item_id);
+        // 现有墓碑 + 本次上报的墓碑(取较新的 deleted_at)
+        const tomb = new Map(cacheManager.db.prepare('SELECT item_id, deleted_at FROM user_history_deleted WHERE user_token = ?').all(token).map(r => [r.item_id, r.deleted_at]));
+        for (const d of (Array.isArray(deleted) ? deleted : [])) {
+            if (!d || !d.id) continue;
+            const at = Number(d.deleted_at) || Date.now();
+            if (!(tomb.get(d.id) >= at)) tomb.set(d.id, at);
+        }
 
-        // 计算需要删除的 ID（服务器有但本地没有的）
+        // 计算需要删除的 ID（服务器有但本地没推上来的，单设备删除路径）
+        const existingIds = cacheManager.db.prepare('SELECT item_id FROM user_history WHERE user_token = ?').all(token).map(row => row.item_id);
         const pushingIds = new Set(history.map(item => item.id));
         const idsToDelete = existingIds.filter(id => !pushingIds.has(id));
+        const PRUNE_MS = 120 * 24 * 60 * 60 * 1000;  // 墓碑保留 120 天，过期剪枝避免无限增长
 
-        let saved = 0;
-        let deleted = 0;
-        const transaction = cacheManager.db.transaction((items) => {
-            // 1. 插入/更新本地有的记录
-            for (const item of items) {
-                if (item.id && item.data) {
-                    insertStmt.run(
-                        token,
-                        item.id,
-                        JSON.stringify(item.data),
-                        item.updated_at || Date.now()
-                    );
-                    saved++;
-                }
+        let saved = 0, deletedCount = 0;
+        const transaction = cacheManager.db.transaction(() => {
+            // 1. 插入历史，但被【更新的删除墓碑】压制的不入库(防复活)；若该条比墓碑更新=重新观看,清墓碑后入库
+            for (const item of history) {
+                if (!item.id || !item.data) continue;
+                const upd = item.updated_at || Date.now();
+                const td = tomb.get(item.id);
+                if (td != null && td >= upd) { deleteHist.run(token, item.id); continue; }  // 删除比这次观看新 → 压制
+                if (td != null) tomb.delete(item.id);  // 这次观看更新 → 重新观看,墓碑作废
+                insertStmt.run(token, item.id, JSON.stringify(item.data), upd);
+                saved++;
             }
-
-            // 2. 删除本地已删除的记录
-            if (idsToDelete.length > 0) {
-                const deleteStmt = cacheManager.db.prepare(
-                    'DELETE FROM user_history WHERE user_token = ? AND item_id = ?'
-                );
-                for (const id of idsToDelete) {
-                    deleteStmt.run(token, id);
-                    deleted++;
-                }
-                console.log(`[History Sync] 删除了 ${deleted} 条已移除的记录:`, idsToDelete);
-            }
+            // 2. 单设备删除：服务器有、推送里没有的，删掉(沿用旧行为,不打墓碑以免误伤未同步设备)
+            for (const id of idsToDelete) { deleteHist.run(token, id); deletedCount++; }
+            // 3. 持久化墓碑(剪枝过期)
+            cacheManager.db.prepare('DELETE FROM user_history_deleted WHERE user_token = ?').run(token);
+            const cutoff = Date.now() - PRUNE_MS;
+            for (const [id, at] of tomb) { if (at >= cutoff) upsertTomb.run(token, id, at); }
         });
+        transaction();
 
-        transaction(history);
-
-        res.json({ sync_enabled: true, saved: saved, deleted: deleted });
+        res.json({ sync_enabled: true, saved: saved, deleted: deletedCount });
     } catch (e) {
         console.error('[History Push Error]', e.message);
         res.status(500).json({ error: 'Database error' });
@@ -1060,6 +1137,7 @@ app.post('/api/history/clear', (req, res) => {
     if (!userInfo) {
         return res.status(401).json({ error: 'Invalid token' });
     }
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
 
     // 从 SQLite 删除该用户的所有历史
     if (cacheManager.type !== 'sqlite' || !cacheManager.db) {
@@ -1087,6 +1165,7 @@ app.get('/api/settings/pull', (req, res) => {
     if (!userToken) return res.status(400).json({ error: 'Missing token' });
     const userInfo = PASSWORD_HASH_MAP[userToken];
     if (!userInfo) return res.status(401).json({ error: 'Invalid token' });
+    if (isBanned(userToken)) return res.status(403).json({ error: 'banned', banned: true });
     if (!userInfo.syncEnabled) return res.json({ sync_enabled: false, settings: {} });
     if (cacheManager.type !== 'sqlite' || !cacheManager.db) {
         return res.json({ sync_enabled: true, settings: {}, message: 'SQLite not available' });
@@ -1110,6 +1189,7 @@ app.post('/api/settings/push', (req, res) => {
     }
     const userInfo = PASSWORD_HASH_MAP[token];
     if (!userInfo) return res.status(401).json({ error: 'Invalid token' });
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
     if (!userInfo.syncEnabled) return res.json({ sync_enabled: false, saved: 0 });
     if (cacheManager.type !== 'sqlite' || !cacheManager.db) {
         return res.json({ sync_enabled: true, saved: 0, message: 'SQLite not available' });
@@ -1128,6 +1208,234 @@ app.post('/api/settings/push', (req, res) => {
         console.error('[Settings Push Error]', e.message);
         res.status(500).json({ error: 'Database error' });
     }
+});
+
+// ========== 求片 API（用户提交想看的剧；站长后台贴磁力/下载链接履行）==========
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const REQ_DB_OK = () => cacheManager.type === 'sqlite' && cacheManager.db;
+
+// ========== 用户统计/封禁 助手 ==========
+// 记录用户活跃(last_active)、登录(last_login)、身份标签(label=email)。在历史同步/求片/登录处调用。
+function touchUser(token, opts) {
+    opts = opts || {};
+    if (!REQ_DB_OK() || !token) return;
+    try {
+        const now = Date.now();
+        const exists = cacheManager.db.prepare('SELECT 1 FROM user_stats WHERE user_token = ?').get(token);
+        if (exists) {
+            cacheManager.db.prepare('UPDATE user_stats SET last_active = ?, last_login = COALESCE(?, last_login), label = COALESCE(?, label) WHERE user_token = ?')
+                .run(now, opts.login ? now : null, (opts.label && String(opts.label).trim()) ? String(opts.label).trim() : null, token);
+        } else {
+            cacheManager.db.prepare('INSERT INTO user_stats (user_token, label, first_seen, last_login, last_active, banned) VALUES (?, ?, ?, ?, ?, 0)')
+                .run(token, (opts.label && String(opts.label).trim()) ? String(opts.label).trim() : null, now, opts.login ? now : null, now);
+        }
+    } catch (e) { /* 统计失败不影响主流程 */ }
+}
+function isBanned(token) {
+    if (!REQ_DB_OK() || !token) return false;
+    try { const r = cacheManager.db.prepare('SELECT banned FROM user_stats WHERE user_token = ?').get(token); return !!(r && r.banned); }
+    catch (e) { return false; }
+}
+// 恒定时间比较 ADMIN_TOKEN（后台接口会吐出全站独立密码明文，避免计时侧信道猜令牌）
+function adminTokenMatch(provided) {
+    if (!ADMIN_TOKEN || !provided) return false;
+    const a = Buffer.from(String(provided)), b = Buffer.from(ADMIN_TOKEN);
+    if (a.length !== b.length) return false;
+    try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
+}
+
+// 提交求片（需登录账号）
+app.post('/api/requests', (req, res) => {
+    if (!ADMIN_TOKEN) return res.status(403).json({ error: '求片功能未开启' });  // 未配 ADMIN_TOKEN = 功能关闭
+    const { token, name, tmdb_id, poster, note, label, year, aka, cast } = req.body || {};
+    if (!token || !name || !String(name).trim()) return res.status(400).json({ error: 'Missing token or name' });
+    if (!PASSWORD_HASH_MAP[token]) return res.status(401).json({ error: 'Invalid token' });
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
+    if (!REQ_DB_OK()) return res.json({ ok: false, message: 'SQLite not available' });
+    touchUser(token, { label });  // 记录活跃 + 身份标签(email)
+    try {
+        // 防刷：单用户待处理(pending)上限 3
+        const pending = cacheManager.db.prepare("SELECT COUNT(*) c FROM content_requests WHERE user_token = ? AND status = 'pending'").get(token).c;
+        if (pending >= 3) return res.status(429).json({ error: '最多同时有 3 条待处理的求片，请等已有的处理完或先撤销' });
+        const now = Date.now();
+        const info = cacheManager.db.prepare(`INSERT INTO content_requests (user_token, user_label, name, tmdb_id, poster, note, year, aka, cast_info, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`).run(
+            token, String(label || '').slice(0, 120), String(name).trim().slice(0, 200),
+            String(tmdb_id || '').slice(0, 40), String(poster || '').slice(0, 400), String(note || '').slice(0, 500),
+            String(year || '').slice(0, 20), String(aka || '').slice(0, 200), String(cast || '').slice(0, 200), now, now);
+        res.json({ ok: true, id: info.lastInsertRowid });
+    } catch (e) { console.error('[求片提交]', e.message); res.status(500).json({ error: 'Database error' }); }
+});
+
+// 撤销自己的求片（仅限本人；pending 或 need_info 可撤销）→ 让"上限 3"不至于把人卡死，
+// 也用于 need_info 补充重提时清掉旧的那条（避免同片堆积孤儿记录）。已履行/已拒绝的不可删。
+app.post('/api/requests/cancel', (req, res) => {
+    const { token, id } = req.body || {};
+    if (!token || !PASSWORD_HASH_MAP[token]) return res.status(401).json({ error: 'Invalid token' });
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
+    if (!REQ_DB_OK() || !id) return res.status(400).json({ error: 'Bad request' });
+    try {
+        const info = cacheManager.db.prepare("DELETE FROM content_requests WHERE id = ? AND user_token = ? AND status IN ('pending', 'need_info')").run(id, token);
+        res.json({ ok: true, deleted: info.changes });
+    } catch (e) { res.status(500).json({ error: 'Database error' }); }
+});
+
+// 我的求片
+app.get('/api/requests/mine', (req, res) => {
+    const token = req.query.token;
+    if (!token || !PASSWORD_HASH_MAP[token]) return res.status(401).json({ error: 'Invalid token' });
+    if (isBanned(token)) return res.status(403).json({ error: 'banned', banned: true });
+    if (!REQ_DB_OK()) return res.json({ requests: [] });
+    try {
+        const rows = cacheManager.db.prepare(`SELECT id, name, tmdb_id, poster, note, year, aka, cast_info, status, fulfill_link, fulfill_note, created_at, updated_at
+            FROM content_requests WHERE user_token = ? ORDER BY created_at DESC LIMIT 100`).all(token);
+        res.json({ requests: rows });
+    } catch (e) { res.status(500).json({ error: 'Database error' }); }
+});
+
+// 站长：列出全部求片（用 ADMIN_TOKEN 鉴权）
+app.get('/api/requests/admin', (req, res) => {
+    // 优先从请求头取令牌(避免 ADMIN_TOKEN 落入访问日志/Referer/浏览器历史)；兼容旧的 query 传参
+    const admin = req.headers['x-admin-token'] || req.query.admin;
+    if (!adminTokenMatch(admin)) return res.status(403).json({ error: 'Forbidden' });
+    if (!REQ_DB_OK()) return res.json({ requests: [] });
+    try {
+        const status = req.query.status;
+        const rows = status
+            ? cacheManager.db.prepare(`SELECT * FROM content_requests WHERE status = ? ORDER BY created_at DESC LIMIT 500`).all(status)
+            : cacheManager.db.prepare(`SELECT * FROM content_requests ORDER BY (status='pending') DESC, created_at DESC LIMIT 500`).all();
+        // 加上求片人身份(邮箱/独立密码/token前缀)，方便站长确认是谁提的
+        rows.forEach(r => { r.identity = userIdentity(r.user_token, r.user_label); });
+        res.json({ requests: rows });
+    } catch (e) { res.status(500).json({ error: 'Database error' }); }
+});
+
+// 站长：履行/更新求片（贴链接、改状态、删除）
+app.post('/api/requests/admin', (req, res) => {
+    const { admin, id, action, status, fulfill_link, fulfill_note } = req.body || {};
+    if (!adminTokenMatch(admin)) return res.status(403).json({ error: 'Forbidden' });
+    if (!REQ_DB_OK() || !id) return res.status(400).json({ error: 'Bad request' });
+    try {
+        if (action === 'delete') {
+            cacheManager.db.prepare('DELETE FROM content_requests WHERE id = ?').run(id);
+            return res.json({ ok: true, deleted: true });
+        }
+        const st = ['pending', 'fulfilled', 'rejected', 'need_info'].includes(status) ? status : 'fulfilled';
+        cacheManager.db.prepare(`UPDATE content_requests SET status = ?, fulfill_link = ?, fulfill_note = ?, updated_at = ? WHERE id = ?`)
+            .run(st, String(fulfill_link || '').slice(0, 2000), String(fulfill_note || '').slice(0, 500), Date.now(), id);
+        res.json({ ok: true });
+    } catch (e) { console.error('[求片履行]', e.message); res.status(500).json({ error: 'Database error' }); }
+});
+
+// ========== 站长后台：用户统计 / 封禁（均 ADMIN_TOKEN 鉴权，仅 网址#admin 用得到）==========
+const adminAuthed = (req) => {
+    const t = req.headers['x-admin-token'] || req.query.admin || (req.body && req.body.admin);
+    return adminTokenMatch(t);
+};
+
+// 用户统计列表 + 聚合（观看数据从 user_history 现算；活跃/登录/封禁从 user_stats）
+app.get('/api/admin/users', (req, res) => {
+    if (!adminAuthed(req)) return res.status(403).json({ error: 'Forbidden' });
+    if (!REQ_DB_OK()) return res.json({ users: [], aggregates: {} });
+    try {
+        const now = Date.now(), DAY = 86400000;
+        // 1. 每用户观看聚合(数量/最近观看)
+        const hist = {};
+        for (const r of cacheManager.db.prepare('SELECT user_token, COUNT(*) cnt, MAX(updated_at) last FROM user_history GROUP BY user_token').all()) {
+            hist[r.user_token] = { watch_count: r.cnt, last_watch: r.last, watch_seconds: 0 };
+        }
+        // 2. 估算观看时长：每剧 ≈ (当前集序号-1)*单集时长 + 当前集已看进度。
+        //    比只算"当前集位置"更接近真实(老办法严重低估多集剧)，但仍是估算(前面集未必真看完/快进)→ 前端标"估"。
+        //    ORDER BY 使限量扫描确定(取最近 N 条)，避免无序 LIMIT 的不确定取样。
+        for (const row of cacheManager.db.prepare('SELECT user_token, item_data FROM user_history ORDER BY updated_at DESC LIMIT 200000').all()) {
+            const a = hist[row.user_token]; if (!a) continue;
+            try {
+                const d = JSON.parse(row.item_data) || {};
+                const pt = Number(d.progressTime) || 0;       // 当前集已看秒数
+                const pd = Number(d.progressDuration) || 0;   // 当前集时长
+                const em = String(d.episode || '').match(/(\d+)/);
+                const epIdx = em ? parseInt(em[1]) : 1;
+                let secs = pt;
+                if (epIdx > 1 && pd > 0 && pd < 86400) secs = (epIdx - 1) * pd + pt;  // 前面整集 + 当前进度
+                if (secs > 0 && secs < 200 * 86400) a.watch_seconds += secs;          // 上限防脏数据
+            } catch (e) { }
+        }
+        // 3. 求片数 + 身份标签兜底(email 来自求片记录)
+        const reqCnt = {}, labelMap = {};
+        for (const r of cacheManager.db.prepare('SELECT user_token, COUNT(*) cnt FROM content_requests GROUP BY user_token').all()) reqCnt[r.user_token] = r.cnt;
+        for (const r of cacheManager.db.prepare("SELECT user_token, MAX(user_label) lbl FROM content_requests WHERE user_label IS NOT NULL AND user_label != '' GROUP BY user_token").all()) labelMap[r.user_token] = r.lbl;
+        // 4. user_stats 行
+        const statMap = {};
+        for (const s of cacheManager.db.prepare('SELECT * FROM user_stats').all()) statMap[s.user_token] = s;
+        // 5. 全量 token = 观看者 ∪ 求片者 ∪ 已追踪
+        const tokens = new Set([...Object.keys(hist), ...Object.keys(reqCnt), ...Object.keys(statMap)]);
+        const users = [];
+        for (const tk of tokens) {
+            const st = statMap[tk] || {}, h = hist[tk] || {};
+            users.push({
+                token: tk,
+                identity: userIdentity(tk, st.label || labelMap[tk] || ''),
+                is_v2board: String(tk).startsWith('v2board_'),
+                watch_count: h.watch_count || 0,
+                last_watch: h.last_watch || null,
+                watch_minutes: Math.round((h.watch_seconds || 0) / 60),
+                request_count: reqCnt[tk] || 0,
+                first_seen: st.first_seen || null,
+                last_login: st.last_login || null,
+                last_active: st.last_active || h.last_watch || null,
+                banned: !!st.banned,
+                banned_at: st.banned_at || null
+            });
+        }
+        users.sort((a, b) => (b.last_active || 0) - (a.last_active || 0));
+        const aggregates = {
+            total_users: users.length,
+            active_1d: users.filter(u => u.last_active && now - u.last_active < DAY).length,
+            active_7d: users.filter(u => u.last_active && now - u.last_active < 7 * DAY).length,
+            active_30d: users.filter(u => u.last_active && now - u.last_active < 30 * DAY).length,
+            banned_count: users.filter(u => u.banned).length,
+            v2board_users: users.filter(u => u.is_v2board).length,
+            total_watch_count: users.reduce((s, u) => s + u.watch_count, 0),
+            total_watch_hours: Math.round(users.reduce((s, u) => s + u.watch_minutes, 0) / 60),
+            total_requests: users.reduce((s, u) => s + u.request_count, 0)
+        };
+        res.json({ users: users.slice(0, 1000), aggregates });
+    } catch (e) { console.error('[Admin Users]', e.message); res.status(500).json({ error: 'Database error' }); }
+});
+
+// 封禁 / 解封（被封用户：/api/config 返回 banned→前端锁屏；历史同步/求片接口一律 403）
+app.post('/api/admin/ban', (req, res) => {
+    if (!adminAuthed(req)) return res.status(403).json({ error: 'Forbidden' });
+    if (!REQ_DB_OK()) return res.status(400).json({ error: 'SQLite not available' });
+    const { token, banned } = req.body || {};
+    if (!token) return res.status(400).json({ error: 'Missing token' });
+    try {
+        const b = banned ? 1 : 0, now = Date.now();
+        const exists = cacheManager.db.prepare('SELECT 1 FROM user_stats WHERE user_token = ?').get(token);
+        if (exists) cacheManager.db.prepare('UPDATE user_stats SET banned = ?, banned_at = ? WHERE user_token = ?').run(b, b ? now : null, token);
+        else cacheManager.db.prepare('INSERT INTO user_stats (user_token, first_seen, last_active, banned, banned_at) VALUES (?, ?, ?, ?, ?)').run(token, now, now, b, b ? now : null);
+        res.json({ ok: true, banned: !!b });
+    } catch (e) { res.status(500).json({ error: 'Database error' }); }
+});
+
+// 某用户的观看记录（站长 drill-in 看详情）
+app.get('/api/admin/user-history', (req, res) => {
+    if (!adminAuthed(req)) return res.status(403).json({ error: 'Forbidden' });
+    if (!REQ_DB_OK()) return res.json({ history: [] });
+    const token = req.query.token;
+    if (!token) return res.status(400).json({ error: 'Missing token' });
+    try {
+        const rows = cacheManager.db.prepare('SELECT item_id, item_data, updated_at FROM user_history WHERE user_token = ? ORDER BY updated_at DESC LIMIT 300').all(token);
+        const history = rows.map(r => {
+            let d = {}; try { d = JSON.parse(r.item_data) || {}; } catch (e) { }
+            return {
+                name: d.name || r.item_id, episode: d.episode || null, progress: d.progress || 0,
+                progressTime: d.progressTime || 0, progressDuration: d.progressDuration || 0,
+                watchedAt: d.watchedAt || null, updated_at: r.updated_at
+            };
+        });
+        res.json({ history });
+    } catch (e) { res.status(500).json({ error: 'Database error' }); }
 });
 
 // TMDB 通用代理与缓存 API
@@ -1400,8 +1708,16 @@ async function fetchDanmakuFromInstance(base, token, title, ep) {
     const sc = danmakuSearchCache.get(skey);
     if (sc && sc.expiry > Date.now()) { animes = sc.animes; }
     else {
-        const sr = await axios.get(`${base}${prefix}/api/v2/search/episodes`, { params: { anime: title }, timeout: 20000 });
-        animes = (sr.data && sr.data.animes) || [];
+        const _s0 = Date.now();
+        try {
+            const sr = await axios.get(`${base}${prefix}/api/v2/search/episodes`, { params: { anime: title }, timeout: 20000 });
+            animes = (sr.data && sr.data.animes) || [];
+            console.log(`[弹幕诊断] search "${title}" @${base} → ${animes.length} animes (${Date.now() - _s0}ms)`);
+        } catch (e) {
+            // ECONNABORTED=超时, ECONNREFUSED=拒连, ETIMEDOUT=连不上, ENOTFOUND=DNS, 或 HTTP 4xx/5xx(被WAF/限流拦)
+            console.warn(`[弹幕诊断] search "${title}" @${base} 失败: ${e.code || ''} ${e.response ? 'HTTP' + e.response.status : e.message} (${Date.now() - _s0}ms)`);
+            throw e;
+        }
         if (danmakuSearchCache.size >= 500) { const k = danmakuSearchCache.keys().next().value; if (k !== undefined) danmakuSearchCache.delete(k); }
         danmakuSearchCache.set(skey, { animes, expiry: Date.now() + DANMAKU_SEARCH_TTL });
     }
@@ -1415,21 +1731,25 @@ async function fetchDanmakuFromInstance(base, token, title, ep) {
     for (let tries = 0; tries < candidates.length && tries < 3; tries++) {
         const episode = pickDanmakuEpisode(candidates[tries].episodes, ep);
         if (!episode || !episode.episodeId) continue;
+        const _c0 = Date.now();
         try {
             const cr = await axios.get(`${base}${prefix}/api/v2/comment/${episode.episodeId}`, { params: { withRelated: 'true', chConvert: '0' }, timeout: 25000 });
             const d = dandanToDplayer((cr.data && cr.data.comments) || []);
+            console.log(`[弹幕诊断] comment/${episode.episodeId} (${platOf(candidates[tries].animeTitle) || '?'}) → ${d.length} 条 (${Date.now() - _c0}ms)`);
             if (d.length) return d;
-        } catch (e) { /* 该平台失败，试下一个 */ }
+        } catch (e) { console.warn(`[弹幕诊断] comment/${episode.episodeId} 失败: ${e.code || ''} ${e.response ? 'HTTP' + e.response.status : e.message} (${Date.now() - _c0}ms)`); }
     }
     return [];
 }
 app.get('/api/danmaku/v3/', async (req, res) => {
     const empty = { code: 0, version: 3, data: [], msg: '' };
-    // 缓存策略：默认短缓存(空/出错只 5min，避免 CDN 把"暂时为空"锁住很久)；取到非空弹幕时改长缓存。
-    // 弹幕近乎静态 → 7 天新鲜 + 30 天 stale-while-revalidate(过期后先回旧缓存秒开、同时后台重新抓取更新)。
-    // 注意：缓存加在本接口(键 = ?id=剧名|集名，稳定)，不要去缓存 danmu_api 的 comment/{id}(id 会过期、键永远变)。
+    // 缓存策略：空/出错一律 no-store——绝不让 CDN/浏览器缓存"暂时为空"的弹幕。
+    //   (事故：CF 的"浏览器缓存TTL=1年"会把空响应在每个用户浏览器冻结一年 → 某集偶发一次取空就永久没弹幕。
+    //    服务器侧另有 90s miss 缓存护住上游，所以 no-store 不会反复打 danmu_api。)
+    // 取到非空弹幕才长缓存：弹幕近乎静态 → 7 天新鲜 + 30 天 stale-while-revalidate(过期先回旧缓存秒开、后台重抓)。
+    // 注意：缓存键 = ?id=剧名|集名(稳定)；不要去缓存 danmu_api 的 comment/{id}(id 会过期、键永远变)。
     const LONG_CACHE = 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=2592000';
-    res.set('Cache-Control', 'public, max-age=90');
+    res.set('Cache-Control', 'no-store');
     const DANMU_API_URL = process.env.DANMU_API_URL;
     if (!DANMU_API_URL) return res.json(empty);
 
@@ -1444,20 +1764,27 @@ app.get('/api/danmaku/v3/', async (req, res) => {
 
     try {
         // 多源回退：DANMU_API_URL 支持逗号分隔多个实例(不同主机/区域=不同出口IP,绕开单实例被上游限流)；
-        //   DANMU_API_TOKEN 逗号分隔则按序与各实例配对，单个则全部实例共用。逐实例尝试，第一个非空即用。
+        //   DANMU_API_TOKEN 逗号分隔则按序与各实例配对，单个则全部实例共用。
         const bases = String(DANMU_API_URL).split(',').map(s => s.trim()).filter(Boolean);
         const tokens = String(process.env.DANMU_API_TOKEN || '').split(',').map(s => s.trim());
         const instances = bases.map((b, i) => ({ base: b, token: tokens.length > 1 ? (tokens[i] || '') : (tokens[0] || '') }));
-        let data = [];
-        for (const inst of instances) {
-            try { data = await fetchDanmakuFromInstance(inst.base, inst.token, title, ep); } catch (e) { data = []; }
-            if (data.length) break;  // 第一个取到非空的实例即用
-        }
-        // 所有实例都空 → 多为上游(iqiyi)限流的瞬时空(实测同集隔几秒重试即满)：等 3s 重试第一个实例一次。
-        //   弹幕异步加载不阻塞视频；超出集数时 pickDanmakuEpisode 返回 null → 各实例本就返回空、这里也取不到，保持空。
+        // 🏁 并行赛跑：所有实例同时查，第一个返回【非空】的即用——一个实例卡死/401 不再拖累其它(原串行会先傻等
+        //    主实例超时 20s 才轮到下一个)。把"空"当失败抛出，让 Promise.any 跳过空结果继续等非空的。
+        const raceInstances = async () => {
+            if (!instances.length) return [];
+            const runs = instances.map(inst => (async () => {
+                const d = await fetchDanmakuFromInstance(inst.base, inst.token, title, ep);
+                if (!d.length) throw new Error('empty');
+                return d;
+            })());
+            try { return await Promise.any(runs); } catch (e) { return []; }
+        };
+        let data = await raceInstances();
+        // 全空 → 多为上游(iqiyi)限流的瞬时空(实测同集隔几秒重试即满)：等 3s 再赛一轮。
+        //   超出集数时 pickDanmakuEpisode 返回 null → 各实例本就返回空、这里也取不到，保持空。
         if (!data.length && instances.length) {
             await new Promise(r => setTimeout(r, 3000));
-            try { data = await fetchDanmakuFromInstance(instances[0].base, instances[0].token, title, ep); } catch (e) { data = []; }
+            data = await raceInstances();
         }
         // 上游不保证按时间排序：先按时间[0]升序，确保下面"按索引均匀采样"=="按时间均匀采样"(后半段不丢)
         data.sort((a, b) => a[0] - b[0]);
