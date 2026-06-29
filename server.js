@@ -66,12 +66,26 @@ const REMOTE_DB_URL = process.env['REMOTE_DB_URL'] || '';
 // CORS 代理 URL（用于中转无法直接访问的资源站 API）
 const CORS_PROXY_URL = process.env['CORS_PROXY_URL'] || '';
 
+// 📺 直播(IPTV)：上游 M3U 源(vbskycn/iptv，每6h更新)。可用 LIVE_M3U_URL 覆盖主源、LIVE_M3U_FALLBACK 覆盖备源；
+//    设 LIVE_TV_DISABLED=1 整体关闭(前端隐藏直播区、后端 /api/live/channels 返回 enabled:false)。
+const LIVE_M3U_URL = process.env['LIVE_M3U_URL'] || 'https://live.zbds.top/tv/iptv4.m3u';
+const LIVE_M3U_FALLBACK = process.env['LIVE_M3U_FALLBACK'] || 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u';
+// 第二上游(iptv-org cn)：补 CDN 域名源——vbskycn 的 CCTV 多是运营商 IP(封 Cloudflare 放不了)，iptv-org 有 cctvplus 等 CDN 源。
+const LIVE_M3U_IPTVORG = process.env['LIVE_M3U_IPTVORG'] || 'https://iptv-org.github.io/iptv/countries/cn.m3u';
+// 自定义上游(可选)：用户有付费 IPTV 的 m3u 可设 LIVE_M3U_EXTRA(逗号分隔多个)，并入合并 → 能播什么由它决定。
+const LIVE_M3U_EXTRA = (process.env['LIVE_M3U_EXTRA'] || '').split(',').map(s => s.trim()).filter(Boolean);
+const LIVE_TV_ENABLED = !process.env['LIVE_TV_DISABLED'];
+// 后台验证：每次刷新后通过 worker(http源)/直连(https源)实测每个频道首条线路能否播，标 ok 并把能播的排前。
+// 不删频道(全列出),只标记+排序。设 LIVE_NO_VALIDATE=1 关闭(纯全列出、不打 worker)。
+const LIVE_VALIDATE = !process.env['LIVE_NO_VALIDATE'];
+
 // 环境变量加载状态日志（用于 Vercel 调试）
 console.log(`[System] Environment: ${process.env.VERCEL ? 'Vercel Serverless' : 'Local/VPS'}`);
 console.log(`[System] TMDB_API_KEY: ${process.env.TMDB_API_KEY ? '✓ Configured' : '✗ Missing'}`);
 console.log(`[System] TMDB_PROXY_URL: ${process.env['TMDB_PROXY_URL'] || '(not set)'}`);
 console.log(`[System] CORS_PROXY_URL: ${CORS_PROXY_URL || '(not set)'}`);
 console.log(`[System] REMOTE_DB_URL: ${REMOTE_DB_URL ? '✓ Configured' : '(not set)'}`);
+console.log(`[System] 直播(IPTV): ${LIVE_TV_ENABLED ? '✓ 启用 (' + LIVE_M3U_URL + ')' : '✗ 已禁用 (LIVE_TV_DISABLED)'}`);
 
 
 
@@ -971,6 +985,276 @@ app.use(express.static('public', {
 
 const IS_VERCEL = !!process.env.VERCEL;
 
+// ========== 📺 直播(IPTV)频道：拉取上游 M3U → 解析 → 精选 → 缓存(6h) ==========
+// 服务器只负责"拉取+精选+缓存+定时更新"；真正的"测速/线路选择/可用性"放在客户端做——
+// 直播多为 http:// 运营商源(混合内容)，实际播放走 CF Worker 代理，客户端在自己网络上测才准。
+const LIVE_CACHE_TTL = 6 * 60 * 60 * 1000;
+let _liveCache = { at: 0, data: [], ok: false };
+let _liveInflight = null;
+
+// 分类映射 + 展示顺序。用户选"全列出不验证"：上游全部频道按分类下发，主页行显示前几类，
+// 播放页"快速换台"出 grid + 分类筛选。客户端测线路挑能播的(运营商 IP 源封 CF，放不了)。
+const LIVE_GROUP_MAP = {
+    '央视频道': '央视', '卫视频道': '卫视', '体育频道': '体育', '电影频道': '影视',
+    '纪录频道': '纪实', '儿童频道': '少儿', '音乐频道': '音乐', '春晚频道': '专题',
+    '地方频道': '地方', '直播中国': '地方', '数字频道': '数字', '解说频道': '体育'
+};
+const LIVE_GROUP_ORDER = ['央视', '卫视', '体育', '影视', '电影', '电视剧', '综艺', '新闻', '纪实', '少儿', '音乐', '文化', '教育', '科教', '财经', '生活', '宗教', '购物', '专题', '数字', '地方', '成人', '其他'];
+// 主页一行显示的分类(其余靠播放页 grid + 分类浏览)
+const LIVE_HOME_GROUPS = new Set(['央视', '卫视', '体育']);
+
+// 🌍 国际频道：iptv-org 按语言的播放列表(每种封顶，控制总量/内存)。lang 从播放列表来，genre 从 group-title。
+const LIVE_LANGS = [
+    { code: 'eng', name: 'English', cap: 150 }, { code: 'spa', name: 'Español', cap: 150 },
+    { code: 'fra', name: 'Français', cap: 150 }, { code: 'deu', name: 'Deutsch', cap: 120 },
+    { code: 'rus', name: 'Русский', cap: 120 }, { code: 'ara', name: 'العربية', cap: 120 },
+    { code: 'por', name: 'Português', cap: 120 }, { code: 'ita', name: 'Italiano', cap: 100 },
+    { code: 'jpn', name: '日本語', cap: 80 }, { code: 'kor', name: '한국어', cap: 80 },
+    { code: 'hin', name: 'हिन्दी', cap: 80 }, { code: 'vie', name: 'Tiếng Việt', cap: 80 }
+];
+const LIVE_LANG_URL = (code) => `https://iptv-org.github.io/iptv/languages/${code}.m3u`;
+// 🔞 成人直播源(可选)：由站长用 LIVE_M3U_ADULT(逗号分隔)注入；归入"成人"分类，受前端 NSFW 过滤开关控制显隐。
+const LIVE_M3U_ADULT = (process.env['LIVE_M3U_ADULT'] || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// iptv-org group-title(英文 genre) → 中文分类
+const LIVE_INTL_GENRE = {
+    general: '综艺', news: '新闻', movies: '电影', movie: '电影', series: '电视剧', drama: '电视剧',
+    music: '音乐', entertainment: '综艺', sports: '体育', sport: '体育', kids: '少儿', animation: '少儿',
+    documentary: '纪实', culture: '文化', education: '教育', science: '科教', business: '财经',
+    religious: '宗教', shop: '购物', lifestyle: '生活', cooking: '生活', travel: '生活', comedy: '综艺',
+    classic: '电影', family: '综艺', outdoor: '生活', auto: '生活', relax: '生活', weather: '其他', legislative: '新闻'
+};
+function liveIntlGenre(groupTitle) {
+    const g = String(groupTitle || '').toLowerCase().split(';')[0].trim();
+    return LIVE_INTL_GENRE[g] || '其他';
+}
+
+// 名称归一(合并/去重 key)：去掉清晰度/HD/台/频道等噪声、空格横杠，大写
+function liveNormName(name) {
+    return String(name || '')
+        .replace(/\((?:\d{3,4}[pi]|[^)]*?)\)/gi, '')   // (1080p)/(720p)/(...)
+        .replace(/\[[^\]]*\]/g, '')                     // [Not 24/7]
+        .replace(/(高清|超清|蓝光|频道|台|HD|FHD|UHD|4K|8K|IPV6|IPV4)/gi, '')
+        .replace(/[\s\-_·｜|]/g, '')
+        .toUpperCase();
+}
+// 展示名清理(去清晰度/方括号噪声，保留中文台名)
+function liveCleanName(name) {
+    return String(name || '').replace(/\s*\((?:\d{3,4}[pi])\)\s*/gi, ' ').replace(/\s*\[[^\]]*\]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function liveHostIsIP(u) { try { return /^\d{1,3}(\.\d{1,3}){3}$/.test(new URL(u).hostname); } catch (e) { return true; } }
+// 线路可达性打分(越小越靠前)。关键：CF Worker 的 fetch() 只允许标准端口(80/443/8080…)，
+// 运营商源多在 :9901/:82 等非标端口 → worker 取不到(403)；裸 IP 也常被封。域名+标准端口才能过。
+const LIVE_STD_PORTS = new Set([80, 443, 8080, 8443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8880]);
+function liveSrcRank(u) {
+    try {
+        const url = new URL(u);
+        const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(url.hostname);
+        const https = url.protocol === 'https:';
+        const port = url.port ? parseInt(url.port, 10) : (https ? 443 : 80);
+        const stdPort = LIVE_STD_PORTS.has(port);
+        // 智能路由后的可达性：
+        //   ① 域名 https → rank 0：客户端【直连】(原生 HLS 免 CORS；hls.js 若带 CORS)，不经 worker，端口/CF 限制都绕开。
+        //   ② 域名 http + 标准端口 → rank 1：http 在 https 页是混合内容，必须经 worker 升 https；worker 又只接标准端口。
+        //   ③ 裸 IP / 非标端口 http → rank 10+：worker 取不到 + 直连又是混合内容 → 基本放不了。
+        if (!ip && https) return 0;
+        if (!ip && stdPort) return 1;
+        return 10 + (ip ? 2 : 0) + (stdPort ? 0 : 4) + (https ? 0 : 1);
+    } catch (e) { return 99; }
+}
+// 分类判定：先看名字(跨两个上游更稳)，再回退 group-title 映射
+function liveCategoryOf(name, groupTitle) {
+    const n = String(name || '');
+    if (/CCTV|央视|CGTN/i.test(n)) return /(CCTV-?5($|[^0-9])|5\s*[＋+]|体育|赛事|高尔夫|网球|台球|风云足球|斯诺克)/.test(n) ? '体育' : '央视';
+    if (/卫视/.test(n)) return '卫视';
+    if (/(体育|赛事|足球|篮球|网球|高尔夫|台球|斯诺克|搏击|NBA|ESPN)/i.test(n)) return '体育';
+    if (/(电影|影院|剧场|影视|院线)/.test(n)) return '影视';
+    if (/(少儿|动画|卡通|动漫|儿童|宝贝|金鹰卡通|嘉佳)/.test(n)) return '少儿';
+    if (/(纪录|纪实|探索|科教|地理|discovery)/i.test(n)) return '纪实';
+    if (/(新闻|资讯|凤凰)/.test(n)) return '新闻';
+    if (/(音乐|MTV|演唱)/i.test(n)) return '音乐';
+    return LIVE_GROUP_MAP[groupTitle] || '其他';
+}
+
+function parseM3U(text) {
+    const out = [];
+    const lines = String(text).split(/\r?\n/);
+    let cur = null;
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line.startsWith('#EXTINF')) {
+            const name = line.includes(',') ? line.slice(line.lastIndexOf(',') + 1).trim() : '';
+            const logo = (line.match(/tvg-logo="([^"]*)"/i) || [])[1] || '';
+            const group = (line.match(/group-title="([^"]*)"/i) || [])[1] || '';
+            const tvgId = (line.match(/tvg-id="([^"]*)"/i) || [])[1] || '';
+            cur = { name, logo, group, tvgId };
+        } else if (line[0] !== '#') {
+            if (cur) { cur.url = line; out.push(cur); cur = null; }
+        }
+    }
+    return out;
+}
+
+// 合并多路上游 → 按归一名去重 → 分类(语言+种类) → 线路域名优先排序。返回 { channels, groups, langs }。
+// 每条上游频道可带 lang(语言显示名)/intl(国际,用 group-title 映射种类)/adult(成人) 标记。
+function buildLiveChannels(lists) {
+    const map = new Map();   // 归一名 → bucket
+    for (const list of lists) {
+        for (const c of (list || [])) {
+            const u = (c.url || '').trim();
+            if (!/^https?:\/\//i.test(u)) continue;   // 浏览器只能播 http(s) m3u8
+            const key = liveNormName(c.name);
+            if (!key) continue;
+            if (/支持作者|更新时间|请刷新|公众号|演示频道|测试频道|^熊猫直播$/.test(c.name)) continue;   // 过滤上游推广/占位条目
+            let b = map.get(key);
+            if (!b) {
+                const adult = !!c.adult;
+                const group = adult ? '成人' : (c.intl ? liveIntlGenre(c.group) : liveCategoryOf(c.name, c.group));
+                b = { name: liveCleanName(c.name) || c.name, group, lang: c.lang || '中文', adult, logo: '', seen: new Set(), sources: [] };
+                map.set(key, b);
+            } else {
+                const cn = liveCleanName(c.name);
+                if (cn && cn.length < b.name.length) b.name = cn;   // 取更短更干净的展示名
+            }
+            // 台标只收 https(挡混合内容 + 恶意上游 data:/追踪像素)
+            if (!b.logo && c.logo && /^https:\/\//i.test(c.logo)) b.logo = c.logo;
+            if (!b.seen.has(u) && b.sources.length < 12) {
+                b.seen.add(u);
+                b.sources.push({ url: u, rank: liveSrcRank(u) });
+            }
+        }
+    }
+    const channels = [];
+    for (const [key, b] of map) {
+        // 线路排序：可达性打分(域名+标准端口 worker 才取得到；运营商非标端口/裸 IP 排最后)
+        b.sources.sort((a, z) => a.rank - z.rank);
+        channels.push({
+            // 保留 '+' —— 否则 "CCTV+1"(归一名 CCTV+1)和 "CCTV1" 去掉加号都成 lv_CCTV1、id 撞车 → 多个频道同时高亮
+            id: 'lv_' + key.replace(/[^a-zA-Z0-9一-龥+]/g, '').slice(0, 40),
+            name: b.name, group: b.group, lang: b.lang, adult: b.adult, logo: b.logo,
+            rank: b.sources.length ? b.sources[0].rank : 99,   // 最优线路可达性(前端把可能能播的排前面)
+            sources: b.sources.slice(0, 8).map(s => ({ url: s.url }))
+        });
+    }
+    const langOrder = ['中文', ...LIVE_LANGS.map(l => l.name)];
+    const li = (l) => { const i = langOrder.indexOf(l); return i < 0 ? 999 : i; };
+    const gi = (g) => { const i = LIVE_GROUP_ORDER.indexOf(g); return i < 0 ? 999 : i; };
+    channels.sort((a, z) => li(a.lang) - li(z.lang) || gi(a.group) - gi(z.group) || a.name.localeCompare(z.name, 'zh'));
+    const groups = LIVE_GROUP_ORDER.filter(g => channels.some(c => c.group === g));
+    const langs = langOrder.filter(l => channels.some(c => c.lang === l));
+    return { channels, groups, langs };
+}
+
+// 实测一条线路能否播：http 走 worker(=客户端播放路径)、https 直连(≈客户端直连)。拿到 #EXTM3U 即活。
+async function probeLiveSource(url) {
+    const https = /^https:\/\//i.test(url);
+    const target = https ? url : (CORS_PROXY_URL ? `${CORS_PROXY_URL}/?url=${encodeURIComponent(url)}` : null);
+    if (!target) return false;   // http 源无 worker 没法验证(也没法播)
+    try {
+        const r = await axios.get(target, { timeout: 8000, maxContentLength: 8000, responseType: 'text', validateStatus: () => true, headers: { 'User-Agent': 'Mozilla/5.0', 'Range': 'bytes=0-5000' } });
+        if (!(r.status === 200 || r.status === 206)) return false;
+        const body = String(r.data || '');
+        if (!body.includes('#EXTM3U')) return false;
+        // 待机/占位/死台不算"能播"(如 catvod 的 backup.m3u8、无信号轮播)——它们返回 200+m3u8 但放不出实际频道
+        if (/backup\.m3u8|backup_\d|无\s*信\s*号|no[\s_-]?signal|maintain|stand.?by|占位|轮播图/i.test(body)) return false;
+        return true;
+    } catch (e) { return false; }
+}
+
+// 后台验证：标 ch.ok(首条线路能否播)，能播的在组内排前。不删频道。原地 mutate channels。
+async function validateLiveChannels(channels) {
+    let i = 0;
+    const CONC = 32;
+    await Promise.all(Array.from({ length: CONC }, async () => {
+        while (i < channels.length) {
+            const ch = channels[i++];
+            let ok = false;
+            for (const s of (ch.sources || []).slice(0, 2)) { if (await probeLiveSource(s.url)) { ok = true; break; } }
+            ch.ok = ok;
+        }
+    }));
+    const langOrder = ['中文', ...LIVE_LANGS.map(l => l.name)];
+    const li = (l) => { const x = langOrder.indexOf(l); return x < 0 ? 999 : x; };
+    const gi = (g) => { const x = LIVE_GROUP_ORDER.indexOf(g); return x < 0 ? 999 : x; };
+    // 语言 → 分类 → 能播优先 → rank → 名称
+    channels.sort((a, z) => li(a.lang) - li(z.lang) || gi(a.group) - gi(z.group) || ((z.ok ? 1 : 0) - (a.ok ? 1 : 0)) || (a.rank - z.rank) || a.name.localeCompare(z.name, 'zh'));
+    return channels;
+}
+
+async function fetchLiveUpstream() {
+    const get = async (urls) => {
+        for (const u of urls) {
+            try {
+                const r = await axios.get(u, { timeout: 12000, responseType: 'text', headers: { 'User-Agent': 'Mozilla/5.0' } });
+                if (r.data && String(r.data).includes('#EXTINF')) return String(r.data);
+            } catch (e) { /* 试下一个 */ }
+        }
+        return '';
+    };
+    const [vbText, orgText, ...extraTexts] = await Promise.all([
+        get([LIVE_M3U_URL, LIVE_M3U_FALLBACK].filter(Boolean)),
+        get([LIVE_M3U_IPTVORG].filter(Boolean)),
+        ...LIVE_M3U_EXTRA.map(u => get([u]))
+    ]);
+    if (!vbText && !orgText && !extraTexts.some(Boolean)) throw new Error('upstream M3U fetch failed');
+    const vbList = parseM3U(vbText), orgList = parseM3U(orgText);   // 中文(lang 默认中文)
+    const extraLists = extraTexts.map(t => parseM3U(t));           // 用户自定义付费源(LIVE_M3U_EXTRA)优先
+    // 🌍 国际：按语言拉 iptv-org，每种封顶；intl 标记 → 用 group-title 映射种类
+    const langLists = await Promise.all(LIVE_LANGS.map(async lg => {
+        const t = await get([LIVE_LANG_URL(lg.code)]);
+        return parseM3U(t).slice(0, lg.cap).map(c => ({ ...c, lang: lg.name, intl: true }));
+    }));
+    // 🔞 成人(站长用 LIVE_M3U_ADULT 注入)：归入"成人"分类，受前端 NSFW 过滤控制
+    const adultTexts = await Promise.all(LIVE_M3U_ADULT.map(u => get([u])));
+    const adultList = adultTexts.flatMap(t => parseM3U(t).map(c => ({ ...c, adult: true })));
+    const built = buildLiveChannels([...extraLists, vbList, orgList, ...langLists, adultList]);
+    const intlN = langLists.reduce((s, l) => s + l.length, 0);
+    console.log(`[直播] 上游拉取：中文 ${vbList.length + orgList.length}${LIVE_M3U_EXTRA.length ? '+extra' + extraLists.reduce((s, l) => s + l.length, 0) : ''} + 国际 ${intlN}(${LIVE_LANGS.length}语) + 成人 ${adultList.length} → 合并 ${built.channels.length} 频道 / ${built.groups.length} 类 / ${built.langs.length} 语`);
+    // 后台验证(不阻塞返回)：完成后原地标 ok + 重排，并刷新缓存时间戳让客户端 SWR 取到新版
+    if (LIVE_VALIDATE && CORS_PROXY_URL) {
+        validateLiveChannels(built.channels).then(() => {
+            _liveCache.at = Date.now();
+            console.log(`[直播] 验证完成：${built.channels.filter(c => c.ok).length}/${built.channels.length} 可播`);
+        }).catch(e => console.error('[直播] 验证失败:', e.message));
+    }
+    return built;
+}
+
+// 取直播频道(带 6h 缓存 + 并发合并 + 旧缓存兜底)
+async function getLiveChannels(force = false) {
+    if (!force && _liveCache.ok && (Date.now() - _liveCache.at) < LIVE_CACHE_TTL) return _liveCache.data;
+    if (_liveInflight) return _liveInflight;
+    _liveInflight = (async () => {
+        try {
+            const data = await fetchLiveUpstream();
+            _liveCache = { at: Date.now(), data, ok: true };
+            return data;
+        } catch (e) {
+            console.error('[直播] 刷新失败:', e.message);
+            if (_liveCache.ok) return _liveCache.data;   // 拉取失败时沿用旧缓存
+            _liveCache = { at: Date.now(), data: { channels: [], groups: [], langs: [] }, ok: false };
+            return _liveCache.data;
+        } finally { _liveInflight = null; }
+    })();
+    return _liveInflight;
+}
+
+// 📺 直播频道列表(精选 + 6h 缓存)。前端再本地缓存。
+app.get('/api/live/channels', async (req, res) => {
+    if (!LIVE_TV_ENABLED) return res.json({ enabled: false, channels: [], groups: [], langs: [] });
+    try {
+        const data = await getLiveChannels(false);
+        res.set('Cache-Control', 'public, max-age=1800');   // 客户端/CDN 缓存 30 分钟
+        res.json({ enabled: true, updatedAt: _liveCache.at, count: data.channels.length, channels: data.channels, groups: data.groups, langs: data.langs });
+    } catch (e) {
+        res.json({ enabled: true, channels: [], groups: [], langs: [], error: 'fetch_failed' });
+    }
+});
+
+// 启动后预热缓存(非阻塞)，让首位用户也能秒开直播区
+if (LIVE_TV_ENABLED && !IS_VERCEL) { getLiveChannels(false).catch(() => {}); }
+
 app.get('/api/config', (req, res) => {
     // 检查请求中的 token 是否支持同步
     const userToken = req.query.token || '';
@@ -991,6 +1275,8 @@ app.get('/api/config', (req, res) => {
         danmaku_enabled: !!process.env.DANMU_API_URL,
         // 📮 求片：必须配置 ADMIN_TOKEN(站长才能履行)才开启;否则前端整个隐藏入口、后端拒收
         requests_enabled: !!process.env.ADMIN_TOKEN,
+        // 📺 直播(IPTV)：默认开启，设 LIVE_TV_DISABLED=1 关闭 → 前端隐藏直播区
+        live_enabled: LIVE_TV_ENABLED,
         // 🚫 封禁：站长在后台封了这个用户 → 前端锁屏
         banned: isBanned(userToken)
     });
@@ -1090,13 +1376,11 @@ app.post('/api/history/push', (req, res) => {
             if (!(tomb.get(d.id) >= at)) tomb.set(d.id, at);
         }
 
-        // 计算需要删除的 ID（服务器有但本地没推上来的，单设备删除路径）
-        const existingIds = cacheManager.db.prepare('SELECT item_id FROM user_history WHERE user_token = ?').all(token).map(row => row.item_id);
-        const pushingIds = new Set(history.map(item => item.id));
-        const idsToDelete = existingIds.filter(id => !pushingIds.has(id));
+        // 取每条现有的 updated_at，用于"更新者胜"——防陈旧设备用旧进度覆盖服务器上更新的进度
+        const existingUpd = new Map(cacheManager.db.prepare('SELECT item_id, updated_at FROM user_history WHERE user_token = ?').all(token).map(row => [row.item_id, row.updated_at]));
         const PRUNE_MS = 120 * 24 * 60 * 60 * 1000;  // 墓碑保留 120 天，过期剪枝避免无限增长
 
-        let saved = 0, deletedCount = 0;
+        let saved = 0;
         const transaction = cacheManager.db.transaction(() => {
             // 1. 插入历史，但被【更新的删除墓碑】压制的不入库(防复活)；若该条比墓碑更新=重新观看,清墓碑后入库
             for (const item of history) {
@@ -1105,11 +1389,21 @@ app.post('/api/history/push', (req, res) => {
                 const td = tomb.get(item.id);
                 if (td != null && td >= upd) { deleteHist.run(token, item.id); continue; }  // 删除比这次观看新 → 压制
                 if (td != null) tomb.delete(item.id);  // 这次观看更新 → 重新观看,墓碑作废
+                // ⏱️ 更新者胜(last-writer-wins)：服务器已有更新的版本(别的设备看到了更靠后的集/进度) → 不被旧推送覆盖。
+                //    根治"iPad 看到16集、手机却把进度压回14集"——陈旧设备的旧 updated_at 推送不再 INSERT OR REPLACE 掉新数据。
+                const cur = existingUpd.get(item.id);
+                if (cur != null && cur > upd) continue;
                 insertStmt.run(token, item.id, JSON.stringify(item.data), upd);
                 saved++;
             }
-            // 2. 单设备删除：服务器有、推送里没有的，删掉(沿用旧行为,不打墓碑以免误伤未同步设备)
-            for (const id of idsToDelete) { deleteHist.run(token, id); deletedCount++; }
+            // 2. 墓碑驱动删除（替代危险的"服务器有、推送里没有就删"隐式删除——那会在多设备/本地条数上限不一致
+            //    (本地50 vs 服务器50)/配额降级时，把别的设备刚加/刚续看的剧误删，是经典多端同步反模式）。
+            //    现在只删【显式打了墓碑】的项(removeFromHistory/clearWatchHistory 都打墓碑)：墓碑不早于服务器版本才删，
+            //    re-watch(td<upd, 步骤1已 tomb.delete)的不在此列、别的设备没墓碑的剧一律不动。
+            for (const [id, at] of tomb) {
+                const cur = existingUpd.get(id);
+                if (cur != null && cur <= at) deleteHist.run(token, id);
+            }
             // 3. 持久化墓碑(剪枝过期)
             cacheManager.db.prepare('DELETE FROM user_history_deleted WHERE user_token = ?').run(token);
             const cutoff = Date.now() - PRUNE_MS;
@@ -1117,7 +1411,7 @@ app.post('/api/history/push', (req, res) => {
         });
         transaction();
 
-        res.json({ sync_enabled: true, saved: saved, deleted: deletedCount });
+        res.json({ sync_enabled: true, saved: saved, deleted: 0 });
     } catch (e) {
         console.error('[History Push Error]', e.message);
         res.status(500).json({ error: 'Database error' });
