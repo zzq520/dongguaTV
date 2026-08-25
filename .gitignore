@@ -6,6 +6,8 @@ search_cache.json
 detail_cache.json
 cache_search.json
 cache_detail.json
+cache_intro.json
+cache_intro_env.json
 cache.db
 cache.db-wal
 cache.db-shm
@@ -36,3 +38,4 @@ android-tv/build_*.txt
 
 
 .agents/workflows/search-files.md
+.claude/
